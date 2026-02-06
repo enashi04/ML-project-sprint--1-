@@ -34,16 +34,15 @@ def create_time_features(df):
     
     # Extraire les composantes temporelles
     df['hour'] = df['timestamp'].dt.hour
-    df['day_of_week'] = 
-    df['day_of_month'] = 
-    df['month'] = 
-    df['quarter'] = 
-    df['year'] = 
+    df['day_of_week'] = df['timestamp'].dt.dayofweek
+    df['day_of_month'] = df['timestamp'].dt.day
+    df['month'] = df['timestamp'].dt.month
+    df['quarter'] = df['timestamp'].dt.quarter
+    df['year'] = df['timestamp'].dt.year
     
     # Créer des indicateurs pour jour/nuit et semaine/weekend
-    df['is_night'] = 
-    df['is_weekend'] = 
-    
+    df['is_night'] = (df['hour'] < 6) | (df['hour'] > 18)
+    df['is_weekend'] = df['day_of_week'].isin([5, 6])
     return df
 
 def create_rolling_features(df, window_sizes=[5, 10, 30], group_by='equipment_id'):
@@ -68,10 +67,10 @@ def create_rolling_features(df, window_sizes=[5, 10, 30], group_by='equipment_id
         # Pour chaque colonne numérique
         for col in numeric_cols:
             # Grouper par equipment_id et calculer les statistiques sur la fenêtre glissante
-            df[f'{col}_rolling_mean_{window}'] = 
-            df[f'{col}_rolling_std_{window}'] = 
-            df[f'{col}_rolling_min_{window}'] = 
-            df[f'{col}_rolling_max_{window}'] = 
+            df[f'{col}_rolling_mean_{window}'] = df.groupby(group_by)[col].transform(lambda x: x.rolling(window, min_periods=1).mean())
+            df[f'{col}_rolling_std_{window}'] = df.groupby(group_by)[col].transform(lambda x: x.rolling(window, min_periods=1).std())
+            df[f'{col}_rolling_min_{window}'] = df.groupby(group_by)[col].transform(lambda x: x.rolling(window, min_periods=1).min())
+            df[f'{col}_rolling_max_{window}'] = df.groupby(group_by)[col].transform(lambda x: x.rolling(window, min_periods=1).max())
     
     return df
 
@@ -184,12 +183,17 @@ def create_component_health_features(sensor_df, failure_df):
             current_time = sensor_row['timestamp']
             
             # Trouver les défaillances antérieures à ce moment
+            prev_failures = equip_failures[equip_failures['failure_timestamp'] < current_time]
             
             if len(prev_failures) > 0:
                 # Calculer jours depuis la dernière défaillance
+                last_failure_time = prev_failures['failure_timestamp'].max()
+                days_since_last_failure = (current_time - last_failure_time).days
+                sensor_df.loc[idx, 'days_since_last_failure'] = days_since_last_failure
                 
                 # Compter les défaillances dans les 30 derniers jours
-
+                recent_failures_count = prev_failures[prev_failures['failure_timestamp'] >= current_time - pd.Timedelta(days=30)].shape[0]
+                sensor_df.loc[idx, 'failures_count_last_30days'] = recent_failures_count
     
     return sensor_df
 
@@ -247,7 +251,10 @@ def create_interaction_features(df):
             df[f'{col1}_x_{col2}'] = df[col1] * df[col2]
     
     # Créer les ratios (éviter les divisions par zéro)
-
+    for i, col1 in enumerate(base_cols):
+        for col2 in base_cols[i+1:]:
+            df[f'{col1}_div_{col2}'] = df[col1] / (df[col2].replace(0, np.nan) + 1e-6)
+            df[f'{col2}_div_{col1}'] = df[col2] / (df[col1].replace(0, np.nan) + 1e-6)
     
     return df
 
@@ -255,18 +262,44 @@ def plot_feature_importances(df, target_col='failure_soon', output_path=None):
     """
     Trace et sauvegarde les corrélations entre les caractéristiques et la cible.
     """
+    # Travailler sur une copie
+    df = df.copy()
+
+    # Vérifier que la colonne cible existe
+    if target_col not in df.columns:
+        logger.warning(f"La colonne cible '{target_col}' est absente du DataFrame. Aucun plot généré.")
+        return
+
+    # Si la cible n'est pas numérique, essayer de la convertir
+    if not pd.api.types.is_numeric_dtype(df[target_col]):
+        df[target_col] = pd.to_numeric(df[target_col], errors='coerce')
+        if df[target_col].isna().all():
+            logger.warning(f"La colonne cible '{target_col}' n'a pas pu être convertie en numérique. Aucun plot généré.")
+            return
+
+    # Sélectionner uniquement les colonnes numériques pour le calcul de corrélation
+    numeric_df = df.select_dtypes(include=[np.number]).copy()
+
+    # S'assurer que la colonne cible figure bien dans numeric_df
+    if target_col not in numeric_df.columns:
+        numeric_df[target_col] = df[target_col]
+
     # Calculer les corrélations avec la cible
-    corr_with_target = df.corr()[target_col].sort_values(ascending=False)
-    
+    corr_with_target = numeric_df.corr()[target_col].sort_values(ascending=False)
+
     # Filtrer pour n'inclure que les plus importantes (top 20)
-    top_corr = corr_with_target.drop(target_col)[0:20]
-    
+    top_corr = corr_with_target.drop(labels=[target_col], errors='ignore')[0:20]
+
+    if top_corr.empty:
+        logger.warning("Aucune corrélation numérique disponible à tracer.")
+        return
+
     # Créer le graphique
     plt.figure(figsize=(12, 8))
     sns.barplot(x=top_corr.values, y=top_corr.index)
     plt.title(f'Top 20 des caractéristiques corrélées avec {target_col}')
     plt.tight_layout()
-    
+
     # Sauvegarder ou afficher
     if output_path:
         plt.savefig(output_path)
