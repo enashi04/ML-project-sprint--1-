@@ -140,11 +140,15 @@ def process_data(sensor_file_path, failure_file_path, output_dir='processed_data
 import pandas as pd
 import os
 
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+DATA_DIR = os.path.join(BASE_DIR, "data")
+
+
+
 processed_data = process_data(
-    sensor_file_path=os.path.abspath("../../data/raw/predictive_maintenance_sensor_data.csv"),
-    failure_file_path=os.path.abspath("../../data/raw/predictive_maintenance_failure_logs.csv"),
-    output_dir=os.path.abspath("../../data/processed/")
-)
+    sensor_file_path=os.path.join(DATA_DIR, "raw", "predictive_maintenance_sensor_data.csv"),
+    failure_file_path=os.path.join(DATA_DIR, "raw", "predictive_maintenance_failure_logs.csv"),
+    output_dir=os.path.join(DATA_DIR, "processed"))
 
 # Version du module
 __version__ = '0.1.0'
