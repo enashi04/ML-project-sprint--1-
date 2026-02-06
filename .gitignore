@@ -1,0 +1,24 @@
+# =========================
+# Data files
+# =========================
+*.csv
+*.parquet
+
+# =========================
+# Python cache files
+# =========================
+__pycache__/
+*.pyc
+
+# =========================
+# environnement
+venv/
+.venv/
+env/
+.env/
+ENV/
+# =========================
+# conda files
+conda-env/
+.anaconda/
+.conda/
