@@ -143,8 +143,6 @@ import os
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 DATA_DIR = os.path.join(BASE_DIR, "data")
 
-
-
 processed_data = process_data(
     sensor_file_path=os.path.join(DATA_DIR, "raw", "predictive_maintenance_sensor_data.csv"),
     failure_file_path=os.path.join(DATA_DIR, "raw", "predictive_maintenance_failure_logs.csv"),

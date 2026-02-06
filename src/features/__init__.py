@@ -46,10 +46,12 @@ __all__ = [
     'create_anomaly_scores'
 ]
 
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+DATA_DIR = os.path.join(BASE_DIR, "data")
 
 featured_data = build_features(
-    input_dir=os.path.abspath("../../data/processed/augmented_data/"),
-    output_dir=os.path.abspath("../../data/processed/")
+    input_dir=os.path.abspath(os.path.join(DATA_DIR, "processed", "augmented_data")),
+    output_dir=os.path.abspath(os.path.join(DATA_DIR, "processed"))
 )
 
 # Version du module
