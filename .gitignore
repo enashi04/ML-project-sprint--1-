@@ -12,6 +12,7 @@ __pycache__/
 
 # =========================
 # environnement
+# =========================
 venv/
 .venv/
 env/
@@ -19,6 +20,13 @@ env/
 ENV/
 # =========================
 # conda files
+# =========================
 conda-env/
 .anaconda/
 .conda/
+
+# =========================
+# files in data/processed and augmented
+# =========================
+data/processed/*
+data/validation/*
