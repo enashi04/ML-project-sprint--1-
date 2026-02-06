@@ -72,10 +72,14 @@ def clean_data(input_dir='extracted_data', output_dir='cleaned_data'):
             logger.info(f"Répertoire créé: {output_dir}")
         
         # Création d'un sous-répertoire pour les visualisations
-
+        viz_dir = os.path.join(output_dir, 'visualizations')
+        if not os.path.exists(viz_dir):
+            os.makedirs(viz_dir)
+            logger.info(f"Répertoire de visualisation créé: {viz_dir}")
         
         # Chargement des données extraites
-
+        sensor_data_path = os.path.join(input_dir, 'sensor_data.parquet')
+        failure_data_path = os.path.join(input_dir, 'failure_data.parquet')
         
         logger.info(f"Chargement des données capteurs depuis {sensor_data_path}")
         sensor_df = pd.read_parquet(sensor_data_path)
@@ -90,14 +94,17 @@ def clean_data(input_dir='extracted_data', output_dir='cleaned_data'):
         logger.info(f"Valeurs manquantes dans les données capteurs:\n{missing_values_sensor}")
 
         # Remplacer les valeurs infinies et NaN par 0
-
+        sensor_df.replace([np.inf, -np.inf], np.nan, inplace=True)
+        sensor_df.fillna(0, inplace=True)
         
         # 2. Suppression des lignes avec valeurs manquantes (ou imputation selon la stratégie)
-
+        original_len = len(sensor_df)
+        sensor_df.dropna(inplace=True)
+        
         logger.info(f"Lignes supprimées pour valeurs manquantes: {original_len - len(sensor_df)}")
         
         # 3. Vérification des doublons
-
+        duplicates = sensor_df.duplicated().sum()
         logger.info(f"Nombre de doublons dans les données capteurs: {duplicates}")
         sensor_df = sensor_df.drop_duplicates()
         
@@ -129,7 +136,7 @@ def clean_data(input_dir='extracted_data', output_dir='cleaned_data'):
         # --- Nettoyage des données de défaillance ---
         
         # 1. Vérification des valeurs manquantes
-
+        missing_values_failure = failure_df.isnull().sum()
         logger.info(f"Valeurs manquantes dans les données de défaillance:\n{missing_values_failure}")
         
         # 2. Imputation des valeurs manquantes (si applicable)
@@ -148,8 +155,9 @@ def clean_data(input_dir='extracted_data', output_dir='cleaned_data'):
                 failure_df[column] = failure_df[column].fillna(failure_df[column].median())
         
         # 3. Vérification des doublons
-        
+        duplicates = failure_df.duplicated().sum()
         logger.info(f"Nombre de doublons dans les données de défaillance: {duplicates}")
+        failure_df = failure_df.drop_duplicates()
         
         # 4. Vérification de la cohérence temporelle
         # S'assurer que les défaillances sont pour des équipements existants
@@ -161,7 +169,8 @@ def clean_data(input_dir='extracted_data', output_dir='cleaned_data'):
             failure_df = failure_df[failure_df['equipment_id'].isin(valid_equipment_ids)]
         
         # Sauvegarde des données nettoyées
-
+        sensor_df.to_parquet(os.path.join(output_dir, 'clean_sensor_data.parquet'), index=False)
+        failure_df.to_parquet(os.path.join(output_dir, 'clean_failure_data.parquet'), index=False)
         
         # Également sauvegarder en CSV pour faciliter l'inspection
         sensor_df.to_csv(os.path.join(output_dir, 'clean_sensor_data.csv'), index=False)
