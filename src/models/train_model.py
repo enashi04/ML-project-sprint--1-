@@ -8,6 +8,7 @@ import os
 import pickle
 import pandas as pd
 import numpy as np
+from sklearn.metrics import accuracy_score
 from sklearn.model_selection import train_test_split, GridSearchCV
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 from sklearn.linear_model import LogisticRegression
@@ -64,6 +65,7 @@ class ModelTrainer:
         
         if self.use_gpu:
             self.models = {
+                #Random Forest
                 'random_forest': {
                     'model': cuRF(random_state=random_state),
                     'params': {
@@ -73,6 +75,7 @@ class ModelTrainer:
                     }
                 },
                 # Autres modèles GPU...
+                #Gradient Boosting
                 'xgboost': {
                     'model': xgb.XGBClassifier(tree_method='gpu_hist', gpu_id=0, random_state=random_state),
                     'params': {
@@ -81,6 +84,7 @@ class ModelTrainer:
                         'max_depth': [3, 5, 7]
                     }
                 },
+                #lightgbm
                 'lightgbm': {
                     'model': lgb.LGBMClassifier(device='gpu', random_state=random_state),
                     'params': {
@@ -93,7 +97,76 @@ class ModelTrainer:
 
         else:
             self.models = {
-                
+                'random_forest': {
+                    'model': RandomForestClassifier(
+                        random_state=random_state,
+                        n_jobs=-1,
+                        class_weight='balanced'
+                    ),
+                    'params': {
+                        'n_estimators': [200, 400],
+                        'max_depth': [None, 10, 20],
+                        'min_samples_split': [2, 5, 10],
+                        'min_samples_leaf': [1, 2, 4]
+                    }
+                },
+                'gradient_boosting': {
+                    'model': GradientBoostingClassifier(random_state=random_state),
+                    'params': {
+                        'n_estimators': [100, 200],
+                        'learning_rate': [0.05, 0.1],
+                        'max_depth': [3, 5]
+                    }
+                },
+                'logistic_regression': {
+                    'model': LogisticRegression(
+                        max_iter=2000,
+                        solver='lbfgs',
+                        class_weight='balanced'
+                    ),
+                    'params': {
+                        'C': [0.1, 1.0, 10.0]
+                    }
+                },'svm': {
+                    # probability=True sinon pas de predict_proba
+                    'model': SVC(
+                        probability=True,
+                        class_weight='balanced',
+                        random_state=random_state
+                    ),
+                    'params': {
+                        'C': [0.5, 1.0, 5.0],
+                        'kernel': ['rbf', 'linear']
+                    }
+                },
+                'xgboost': {
+                    'model': xgb.XGBClassifier(
+                        tree_method='hist',
+                        random_state=random_state,
+                        eval_metric='logloss',
+                        n_jobs=-1
+                    ),
+                    'params': {
+                        'n_estimators': [300, 600],
+                        'learning_rate': [0.03, 0.1],
+                        'max_depth': [3, 5, 7],
+                        'subsample': [0.8, 1.0],
+                        'colsample_bytree': [0.8, 1.0]
+                    }
+                },
+                'lightgbm': {
+                    'model': lgb.LGBMClassifier(
+                        random_state=random_state,
+                        n_jobs=-1
+                    ),
+                    'params': {
+                        'n_estimators': [300, 600],
+                        'learning_rate': [0.03, 0.1],
+                        'num_leaves': [31, 63, 127],
+                        'subsample': [0.8, 1.0],
+                        'colsample_bytree': [0.8, 1.0]
+                    }
+                }               
             }
         
     def load_data(self):
@@ -226,12 +299,17 @@ class ModelTrainer:
             # Prédictions
             y_pred = model.predict(X_test)
             y_pred_proba = model.predict_proba(X_test)[:, 1]
+            y_score = self._get_scores_for_auc(model, X_test)
             
             # Métriques
-            accuracy = 
-            conf_matrix = 
-            class_report = 
-            auc_score = 
+            accuracy = accuracy_score(y_test, y_pred)
+            conf_matrix = confusion_matrix(y_test, y_pred)
+            class_report = classification_report(y_test, y_pred)
+            try:
+                auc_score = roc_auc_score(y_test, y_score)
+            except ValueError:
+                auc_score = float("nan")
+                logger.warning("AUC impossible à calculer (une seule classe dans y_test ?)")
             
             logger.info(f"Précision sur l'ensemble de test: {accuracy:.4f}")
             logger.info(f"AUC sur l'ensemble de test: {auc_score:.4f}")
@@ -315,8 +393,11 @@ class ModelTrainer:
         Returns:
             str: Nom du meilleur modèle
         """
-        scores = 
-        best_model = 
+        if metric not in ('auc', 'accuracy'):
+            raise ValueError("metric doit être 'auc' ou 'accuracy'")
+        
+        scores = {model: eval_info[metric] for model, eval_info in evaluation_results.items()}
+        best_model = max(scores, key=scores.get)
         logger.info(f"Meilleur modèle selon {metric}: {best_model} avec un score de {scores[best_model]:.4f}")
         return best_model
         
@@ -463,8 +544,6 @@ if __name__ == "__main__":
     
     args = parser.parse_args()
     
-
-
     train_and_evaluate(
         data_path=args.data_path,
         target_column=args.target_column,

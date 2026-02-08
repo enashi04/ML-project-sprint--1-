@@ -181,11 +181,14 @@ class PredictionEngine:
             if not expected_features:
                 logger.warning("Informations sur les caractéristiques manquantes")
                 # Utiliser toutes les colonnes disponibles sauf l'identifiant
+                cols = [c for c in data.columns if c not in ['equipment_id', 'timestamp', 'prediction_timestamp']]
+                expected_features = cols  
 
             
             # Vérifier les caractéristiques manquantes
+            missing_features = [feature for feature in data.columns if feature not in data.columns]
+            extra_features = [feature for feature in data.columns if feature not in expected_features and feature not in ['equipment_id','timestamp']]
 
-            
             if missing_features:
                 logger.warning(f"Caractéristiques manquantes: {missing_features}")
                 # Ajouter les caractéristiques manquantes avec des valeurs par défaut (0)
@@ -197,7 +200,20 @@ class PredictionEngine:
             
             # Sélectionner uniquement les caractéristiques nécessaires dans le bon ordre
             data_processed = data[expected_features].copy()
+
+            data_processed = ( 
+                data_processed
+                .replace([np.inf, -np.inf],np.nan)
+                .fillna(0)
+            )
             
+            #sécurité si y'a des booleans
+            for col in data_processed.columns: 
+                if data_processed[col].dtype=='bool':
+                    data_processed[col]=data_processed[col].astype(int)
+            
+            #conversion non numériques à voir
+
             logger.info(f"Données prétraitées: {data_processed.shape} échantillons, {data_processed.shape[1]} caractéristiques")
             return data_processed
         
@@ -263,4 +279,126 @@ class PredictionEngine:
         """
         Convertit les probabilités en niveaux de risque.
         
+        Args: 
+        probabilities (array-like) : probabilités de défaillance
+        levels (int): Nombre de niveaux
+
+        Returns : 
+        array : niveau de risque """
+        try :
+            proba= np.asarray(probabilities, dtype=float)
+            proba=np.clip(proba, 0.0,1.0)
+
+            #découpage en quantile
+            quantiles = np.linspace(0,1,levels+1)
+            bins = np.quantile(proba, quantiles)
+
+            #si on a des proba constantesn on veut éviter les bins
+            bins = np.nuique(bins)
+            if len(bins)<=2:
+                bins=np.linspace(0,1,levels+1)
+
+            #risque
+            risk = np.digitize(proba, bins[1:-1], right=True) +1
+            risk=np.clip(risk, 1, levels)
+
+            return risk
+
+        except Exception as e:
+            logger.error(f"Erreur lors du calcul des niveaux de risque: {e}")
+            return None
+        
+    def predict_with_risk_levels(self, data, levels=5, threshold=0.5):
+        """
+        Prédit et ajoute un niveau de risque.
+        """
+        results = self.predict(data, return_probabilities=True, threshold=threshold)
+        if results is None:
+            return None
+        results['risk_level'] = self.calculate_risk_levels(results['failure_probability'].values, levels=levels)
+        return results
+
+    def save_predictions(self, results, output_path=None):
+        """
+        Sauvegarde les prédictions en CSV (et JSON optionnel).
+        
         Args:
+            results (DataFrame): Résultats de prédiction
+            output_path (str): Chemin de sortie (csv). Si None, généré automatiquement.
+            
+        Returns:
+            str: Chemin du fichier sauvegardé
+        """
+        if results is None or len(results) == 0:
+            logger.warning("Aucun résultat à sauvegarder")
+            return None
+
+        if output_path is None:
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            output_path = os.path.join(self.models_dir, f"predictions_{ts}.csv")
+
+        try:
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
+            results.to_csv(output_path, index=False)
+            logger.info(f"Prédictions sauvegardées: {output_path}")
+            return output_path
+        except Exception as e:
+            logger.error(f"Erreur lors de la sauvegarde des prédictions: {e}")
+            return None
+        
+def _read_input_data(input_path):
+    ext = os.path.splitext(input_path)[1].lower()
+    if ext in [".parquet"]:
+        return pd.read_parquet(input_path)
+    if ext in [".csv"]:
+        return pd.read_csv(input_path)
+    if ext in [".json"]:
+        with open(input_path, "r", encoding="utf-8") as f:
+            obj = json.load(f)
+        return pd.DataFrame(obj)
+    raise ValueError("Format non supporté. Utilisez .csv, .parquet ou .json")
+
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="Effectuer des prédictions avec un modèle entraîné")
+    parser.add_argument("--model_path", type=str, default=None, help="Chemin vers un modèle .pkl")
+    parser.add_argument("--models_dir", type=str, default="models", help="Répertoire contenant les modèles")
+    parser.add_argument("--input_path", type=str, required=True, help="Chemin vers les nouvelles données (csv/parquet/json)")
+    parser.add_argument("--output_path", type=str, default=None, help="Chemin de sortie pour les prédictions (csv)")
+    parser.add_argument("--best", action="store_true", help="Utiliser le meilleur modèle du dossier models_dir")
+    parser.add_argument("--metric", type=str, default="auc", choices=["auc", "accuracy"], help="Métrique pour best model")
+    parser.add_argument("--threshold", type=float, default=0.5, help="Seuil pour predicted_failure")
+    parser.add_argument("--risk_levels", type=int, default=5, help="Nombre de niveaux de risque (ex: 5)")
+    
+    args = parser.parse_args()
+    
+    engine = PredictionEngine(model_path=args.model_path, models_dir=args.models_dir)
+
+    # Sélection automatique du modèle
+    if engine.model is None:
+        if args.best:
+            best_path = engine.find_best_model(metric=args.metric)
+            if best_path is None:
+                raise SystemExit("Aucun modèle trouvé pour best=True")
+            if not engine.load_model(best_path):
+                raise SystemExit("Impossible de charger le meilleur modèle")
+        else:
+            latest_path = engine.find_latest_model()
+            if latest_path is None:
+                raise SystemExit("Aucun modèle trouvé")
+            if not engine.load_model(latest_path):
+                raise SystemExit("Impossible de charger le modèle le plus récent")
+
+    # Charger les nouvelles données
+    data_in = _read_input_data(args.input_path)
+
+    # Prédire + risk level
+    results = engine.predict_with_risk_levels(
+        data=data_in,
+        levels=args.risk_levels,
+        threshold=args.threshold
+    )
+
+    # Sauvegarder
+    engine.save_predictions(results, output_path=args.output_path)
