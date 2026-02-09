@@ -36,6 +36,8 @@ def extract_data(sensor_file_path, failure_file_path, output_dir='extracted_data
         # Extraction des données des capteurs
         logger.info(f"Extraction des données de capteurs depuis {sensor_file_path}")
         sensor_data = pd.read_csv(sensor_file_path)
+
+        logger.info(f"Les colonnes présentes dans le fichier de capteurs sont {sensor_data.columns.tolist()}")
         
         # Convertir timestamp en datetime pour les données capteurs
         sensor_data['timestamp'] = pd.to_datetime(sensor_data['timestamp'])
@@ -43,6 +45,7 @@ def extract_data(sensor_file_path, failure_file_path, output_dir='extracted_data
         # Extraction des données de défaillance
         logger.info(f"Extraction des données de défaillance depuis {failure_file_path}")
         failure_data = pd.read_csv(failure_file_path)
+        logger.info(f"Les colonnes présentes dans le fichier de défaillance sont {failure_data.columns.tolist()}")
         # Convertir failure_timestamp en datetime
         failure_data['failure_timestamp'] = pd.to_datetime(failure_data['failure_timestamp'])
 

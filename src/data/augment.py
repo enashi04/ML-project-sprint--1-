@@ -1,3 +1,4 @@
+from narwhals import exclude
 import pandas as pd
 import numpy as np
 import os
@@ -61,6 +62,9 @@ def create_rolling_features(df, window_sizes=[5, 10, 30], group_by='equipment_id
     
     # Colonnes numériques pour les calculs de fenêtre glissante
     numeric_cols = ['temperature', 'vibration', 'pressure', 'current']
+    numeric_cols = [c for c in numeric_cols if c in df.columns]
+    if not numeric_cols:
+        return df
     
     # Pour chaque taille de fenêtre
     for window in window_sizes:
@@ -90,6 +94,10 @@ def create_lag_features(df, lag_periods=[1, 3, 5, 10], group_by='equipment_id'):
     
     # Colonnes numériques pour les calculs de lag
     numeric_cols = ['temperature', 'vibration', 'pressure', 'current']
+    numeric_cols = [c for c in numeric_cols if c in df.columns]
+    if not numeric_cols:
+        return df
+
     
     # Pour chaque période de lag
     for lag in lag_periods:
@@ -117,6 +125,7 @@ def add_failure_indicators(sensor_df, failure_df, time_window=24):
         DataFrame: DataFrame capteurs avec des indicateurs de défaillance ajoutés
     """
     sensor_df = sensor_df.copy()
+    failure_df=failure_df.copy()
     
     # Initialiser les colonnes d'indicateur de défaillance
     sensor_df['failure_soon'] = 0
@@ -137,16 +146,27 @@ def add_failure_indicators(sensor_df, failure_df, time_window=24):
         )
         
         if window_mask.any():
-            # Marquer ces enregistrements comme précédant une défaillance
-            sensor_df.loc[window_mask, 'failure_soon'] = 1
-            
-            # Calculer le temps jusqu'à la défaillance (en heures)
-            sensor_df.loc[window_mask, 'time_to_failure'] = (
-                (failure_time - sensor_df.loc[window_mask, 'timestamp']).dt.total_seconds() / 3600
+            #temps jusqu'à la défaillance
+            ttf_hours = (
+                (failure_time - sensor_df.loc[window_mask, 'timestamp'])
+                .dt.total_seconds() / 3600
             )
-            
-            # Ajouter le type de défaillance suivant
-            sensor_df.loc[window_mask, 'next_failure_type'] = failure_type
+            #maj si la ligne pas encore labellisé ou si la panne est plus proche
+            current_ttf = sensor_df.loc[window_mask, 'time_to_failure']
+            current_ttf_num = pd.to_numeric(current_ttf, errors='coerce')
+            update_mask = current_ttf_num.isna() | (ttf_hours < current_ttf_num)
+
+            if update_mask.any():
+                idx_to_update=sensor_df.loc[window_mask].index[update_mask]
+
+                # Marquer ces enregistrements comme précédant une défaillance
+                sensor_df.loc[idx_to_update, 'failure_soon'] = 1
+
+                  # Mettre le temps jusqu'à la défaillance
+                sensor_df.loc[idx_to_update, 'time_to_failure'] = ttf_hours.loc[idx_to_update]
+
+                # Mettre le type de défaillance suivant (le plus proche)
+                sensor_df.loc[idx_to_update, 'next_failure_type'] = failure_type
     
     return sensor_df
 
@@ -162,39 +182,62 @@ def create_component_health_features(sensor_df, failure_df):
         DataFrame: DataFrame avec des indicateurs de santé des composants ajoutés
     """
     sensor_df = sensor_df.copy()
+    failure_df=failure_df.copy()
     
     # Initialiser colonnes de santé
     sensor_df['days_since_last_failure'] = np.inf
     sensor_df['failures_count_last_30days'] = 0
     
     # Pour chaque équipement unique
+   # Pour chaque équipement
     for equipment_id in sensor_df['equipment_id'].unique():
-        # Obtenir les défaillances pour cet équipement
-        equip_failures = failure_df[failure_df['equipment_id'] == equipment_id]
-        
-        if len(equip_failures) == 0:
-            continue  # Pas de défaillances pour cet équipement
-        
-        # Pour chaque enregistrement de capteur pour cet équipement
-        equip_mask = sensor_df['equipment_id'] == equipment_id
-        equip_sensors = sensor_df[equip_mask]
-        
-        for idx, sensor_row in equip_sensors.iterrows():
-            current_time = sensor_row['timestamp']
-            
-            # Trouver les défaillances antérieures à ce moment
-            prev_failures = equip_failures[equip_failures['failure_timestamp'] < current_time]
-            
-            if len(prev_failures) > 0:
-                # Calculer jours depuis la dernière défaillance
-                last_failure_time = prev_failures['failure_timestamp'].max()
-                days_since_last_failure = (current_time - last_failure_time).days
-                sensor_df.loc[idx, 'days_since_last_failure'] = days_since_last_failure
-                
-                # Compter les défaillances dans les 30 derniers jours
-                recent_failures_count = prev_failures[prev_failures['failure_timestamp'] >= current_time - pd.Timedelta(days=30)].shape[0]
-                sensor_df.loc[idx, 'failures_count_last_30days'] = recent_failures_count
-    
+        # Sous-ensembles capteurs / pannes pour cet équipement
+        eq_mask = sensor_df['equipment_id'] == equipment_id
+        eq_sensor = sensor_df.loc[eq_mask].sort_values('timestamp')
+
+        eq_failures = failure_df[failure_df['equipment_id'] == equipment_id].sort_values('failure_timestamp')
+
+        # Si pas de pannes, on met days_since_last_failure à inf (ou NA si tu préfères)
+        if eq_failures.empty:
+            sensor_df.loc[eq_sensor.index, 'days_since_last_failure'] = np.inf
+            sensor_df.loc[eq_sensor.index, 'failures_count_last_30days'] = 0
+            continue
+
+        # --- 1) Days since last failure ---
+        # Idée : pour chaque ligne capteur, trouver la dernière panne STRICTEMENT avant timestamp
+        last_failure_times = []
+
+        failure_times = eq_failures['failure_timestamp'].values
+
+        for ts in eq_sensor['timestamp'].values:
+            # pannes avant ts
+            past_failures = failure_times[failure_times < ts]
+            if len(past_failures) == 0:
+                last_failure_times.append(pd.NaT)
+            else:
+                last_failure_times.append(past_failures[-1])
+
+        last_failure_times = pd.to_datetime(last_failure_times)
+
+        days_since = (pd.to_datetime(eq_sensor['timestamp']).reset_index(drop=True) - last_failure_times).dt.total_seconds() / 86400.0
+        # Si aucune panne passée -> inf (ou NA)
+        days_since = days_since.fillna(np.inf)
+
+        sensor_df.loc[eq_sensor.index, 'days_since_last_failure'] = days_since.values
+
+        # --- 2) Count of failures in last 30 days ---
+        # Fenêtre [t - window_days, t) => pas le futur
+        window = pd.Timedelta(days=30)
+
+        counts = []
+        for ts in eq_sensor['timestamp'].values:
+            start = ts - window
+            # compter les pannes entre start (inclus) et ts (exclus)
+            c = ((eq_failures['failure_timestamp'] >= start) & (eq_failures['failure_timestamp'] < ts)).sum()
+            counts.append(int(c))
+
+        sensor_df.loc[eq_sensor.index, 'failures_count_last_30days'] = counts
+
     return sensor_df
 
 def feature_scaling(df, method='standard', exclude_cols=None):
@@ -213,10 +256,16 @@ def feature_scaling(df, method='standard', exclude_cols=None):
     
     # Identifier les colonnes numériques
     numeric_cols = df.select_dtypes(include=['number']).columns.tolist()
-    
-    # Exclure les colonnes spécifiées
+    #Exclure les colonnes identifiées.
+    exclude = {"equipment_id", "timestamp", "failure_soon", "time_to_failure", "next_failure_type"}
     if exclude_cols:
-        numeric_cols = [col for col in numeric_cols if col not in exclude_cols]
+        exclude |= set(exclude_cols)
+
+    numeric_cols = [c for c in numeric_cols if c not in exclude]
+    logger.info(f"Colonnes numériques identifiées pour la mise à l'échelle (hors labels): {numeric_cols}")
+
+    if not numeric_cols:
+            return df
     
     # Appliquer la mise à l'échelle
     if method == 'standard':
@@ -251,11 +300,15 @@ def create_interaction_features(df):
             df[f'{col1}_x_{col2}'] = df[col1] * df[col2]
     
     # Créer les ratios (éviter les divisions par zéro)
+    eps = 1e-6
     for i, col1 in enumerate(base_cols):
         for col2 in base_cols[i+1:]:
-            df[f'{col1}_div_{col2}'] = df[col1] / (df[col2].replace(0, np.nan) + 1e-6)
-            df[f'{col2}_div_{col1}'] = df[col2] / (df[col1].replace(0, np.nan) + 1e-6)
-    
+            denom_2 = df[col2].where(df[col2].abs() > eps, np.nan)
+            denom_1 = df[col1].where(df[col1].abs() > eps, np.nan)
+
+            df[f'{col1}_div_{col2}'] = df[col1] / denom_2
+            df[f'{col2}_div_{col1}'] = df[col2] / denom_1
+
     return df
 
 def plot_feature_importances(df, target_col='failure_soon', output_path=None):
@@ -390,8 +443,8 @@ if __name__ == "__main__":
     augmented_data = augment_data()
 
     # Affichage des informations de base sur les données nettoyées
-    print("\nRésumé des données capteurs nettoyées:")
+    print("\nRésumé des données capteurs et de défaillance nettoyées:")
     print(augmented_data.describe())
     
-    print("\nRésumé des données de défaillance nettoyées:")
-    print(augmented_data.describe())
+    # print("\nRésumé des données de défaillance nettoyées:")
+    # print(augmented_data.describe())

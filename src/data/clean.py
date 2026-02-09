@@ -124,11 +124,11 @@ def clean_data(input_dir='extracted_data', output_dir='cleaned_data'):
             # Pour les valeurs aberrantes, les remplacer par des NaN puis imputer
             if outliers_count > 0:
                 # Option 1: Conserver les valeurs aberrantes avec un indicateur
-                sensor_df[f'{column}_outlier'] = outliers_mask
+               # sensor_df[f'{column}_outlier'] = outliers_mask
                 
                 # Option 2: Remplacer par la médiane (à décommenter si préféré)
-                # median_value = sensor_df[~outliers_mask][column].median()
-                # sensor_df.loc[outliers_mask, column] = median_value
+                median_value = sensor_df[~outliers_mask][column].median()
+                sensor_df.loc[outliers_mask, column] = median_value
         
         # 5. Vérification de la cohérence des timestamps
         sensor_df = sensor_df.sort_values(by=['equipment_id', 'timestamp'])
