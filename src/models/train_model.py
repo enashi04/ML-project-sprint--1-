@@ -9,6 +9,8 @@ import pickle
 from pyexpat import model
 import pandas as pd
 import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
 from sklearn.metrics import accuracy_score
 from sklearn.model_selection import train_test_split, GridSearchCV
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
@@ -180,6 +182,64 @@ class ModelTrainer:
         except Exception as e:
             logger.error(f"Erreur lors du chargement des données: {e}")
             raise
+
+    def save_correlation_matrix(self, data, target_column='failure_within_24h', save_dir=None, method='pearson', figsize=(12, 10)):
+        """
+        Calcule et sauvegarde une matrice de corrélation des caractéristiques numériques.
+
+        Retourne les chemins (csv_path, png_path) ou None si impossible.
+        """
+        logger.info("Génération de la matrice de corrélation")
+        try:
+            if save_dir is None:
+                save_dir = self.models_dir
+            os.makedirs(save_dir, exist_ok=True)
+
+            df = data.copy()
+            # retirer la cible si présente
+            if target_column in df.columns:
+                df = df.drop(columns=[target_column])
+
+            # enlever colonnes de fuite connues
+            leakage_cols = [
+                'failure_soon',
+                'time_to_failure',
+                'days_since_last_failure',
+                'failures_count_last_30days',
+                'time_in_cycle'
+            ]
+            leakage_cols += [c for c in df.columns if c.startswith('next_failure_type_')]
+            leakage_cols = [c for c in leakage_cols if c in df.columns]
+            if leakage_cols:
+                df = df.drop(columns=leakage_cols)
+
+            # garder seulement numériques
+            df_num = df.select_dtypes(include=[np.number])
+            if df_num.shape[1] == 0:
+                logger.warning("Aucune colonne numérique disponible pour la corrélation")
+                return None
+
+            corr = df_num.corr(method=method)
+
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            csv_path = os.path.join(save_dir, f"correlation_matrix_{timestamp}.csv")
+            png_path = os.path.join(save_dir, f"correlation_matrix_{timestamp}.png")
+
+            corr.to_csv(csv_path)
+
+            plt.figure(figsize=figsize)
+            sns.heatmap(corr, cmap='coolwarm', center=0)
+            plt.title(f"Matrice de corrélation ({method})")
+            plt.tight_layout()
+            plt.savefig(png_path)
+            plt.close()
+
+            logger.info(f"Matrice de corrélation sauvegardée: {csv_path}, {png_path}")
+            return csv_path, png_path
+
+        except Exception as e:
+            logger.error(f"Erreur lors de la génération de la matrice de corrélation: {e}")
+            return None
             
     def prepare_train_test_data(self, data, target_column='failure_within_24h'):
         """
@@ -526,6 +586,11 @@ def train_and_evaluate(data_path, target_column='failure_within_24h', models_to_
     
     # Charger les données
     data = trainer.load_data()
+    # Générer et sauvegarder la matrice de corrélation (CSV + PNG) dans le dossier des modèles
+    try:
+        trainer.save_correlation_matrix(data, target_column=target_column, save_dir=models_dir)
+    except Exception:
+        logger.warning("Impossible de générer la matrice de corrélation")
     
     # Préparer les ensembles d'entraînement et de test
     X_train, X_test, y_train, y_test = trainer.prepare_train_test_data(
