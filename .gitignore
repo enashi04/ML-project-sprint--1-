@@ -30,3 +30,14 @@ conda-env/
 # =========================
 data/processed/*
 data/validation/*
+
+#pkl
+*.pkl
+
+#log
+*.log
+*.joblib
+
+#image
+*.png
+
