@@ -317,9 +317,25 @@ def reduce_dimensionality(df, n_components=None, method='pca', exclude_cols=None
     
     # Identifier les colonnes numériques
     numeric_cols = df.select_dtypes(include=['number']).columns.tolist()
-    assert 'failure_within_24h' not in numeric_cols, \
-    "ERREUR: failure_within_24h est incluse dans le PCA (data leakage)"
+    #test des données
+    corr = df[numeric_cols].corr().abs()
+    corr_mean =np.mean(corr.values)
+    print(f"Correlation moyenne des colonnes numériques: {corr_mean}")
+    num = df.select_dtypes(include=['number'])
+    print("Nb colonnes numériques:", num.shape[1])
+    print("Nb colonnes constantes:", (num.nunique(dropna=False) <= 1).sum())
+    print("Pct NaN moyen:", num.isna().mean().mean())
+
+    corr = num.corr()
+    print("Pct NaN dans la matrice de corr:", corr.isna().mean().mean())
+
+    # assert 'failure_within_24h' not in numeric_cols, \
+    # "ERREUR: failure_within_24h est incluse dans le PCA (data leakage)"
     
+    #pb de leak :exclure target et autres colonnes liées à la target
+    targets = {'failure_within_24h','failure_soon'}
+    numeric_cols=[c for c in numeric_cols if c not in targets]
+
     # Exclure les colonnes spécifiées
     if exclude_cols:
         numeric_cols = [c for c in numeric_cols if c not in set(exclude_cols)]
@@ -344,13 +360,9 @@ def reduce_dimensionality(df, n_components=None, method='pca', exclude_cols=None
             logger.warning("n_components trop petit après ajustement, PCA ignoré")
             return df, None
         
-      
-
         # Appliquer PCA
         pca = PCA(n_components=n_components, random_state=42)
         transformed = pca.fit_transform(X)
-        
-
 
         # Ajouter les composantes au DataFrame (concat en une fois = anti-fragmentation)
         comp = pd.DataFrame(
@@ -505,6 +517,18 @@ def build_features(input_dir='augmented_data', output_dir='featured_data'):
         logger.info("Calcul des scores d'anomalie")
         df = create_anomaly_scores(df, method='zscore')
 
+        # Créer la target avant de drop (et sécuriser si colonne absente)
+        if 'time_to_failure' in df.columns:
+            df['failure_within_24h'] = ((df['time_to_failure'] > 0) & (df['time_to_failure'] <= 24)).astype(int)
+            df['time_to_failure'] = df['time_to_failure'].fillna(0)
+        else:
+            df['failure_within_24h'] = 0
+            df['time_to_failure'] = 0
+
+        # Assurer que failure_soon est strictement binaire (0 ou 1)
+        if 'failure_soon' in df.columns:
+            df['failure_soon'] = (df['failure_soon'] > 0).astype(int)
+
         # 6. Réduction de dimensionnalité
         exclude_from_pca = ['equipment_id', 'timestamp', 'failure_soon', 'time_to_failure',
                            'anomaly_score', 'days_since_last_failure']
@@ -518,21 +542,14 @@ def build_features(input_dir='augmented_data', output_dir='featured_data'):
 
         df, pca_transformer = reduce_dimensionality(df, n_components=2, method='pca', exclude_cols=exclude_from_pca)
 
-        print("Somme variance expliquée :", np.sum(pca_transformer.explained_variance_ratio_))
-        print("Variance expliquée par composante :", pca_transformer.explained_variance_ratio_[:10])
-
-
-        # Créer la target avant de drop (et sécuriser si colonne absente)
-        if 'time_to_failure' in df.columns:
-            df['failure_within_24h'] = ((df['time_to_failure'] > 0) & (df['time_to_failure'] <= 24)).astype(int)
-            df['time_to_failure'] = df['time_to_failure'].fillna(0)
+        if pca_transformer is not None:
+            logger.info(f"Somme variance expliquée : {float(np.sum(pca_transformer.explained_variance_ratio_)):.4f}")
+            logger.info(f"Variance expliquée par composante : {pca_transformer.explained_variance_ratio_[:10]}")
         else:
-            df['failure_within_24h'] = 0
-            df['time_to_failure'] = 0
+            logger.info("PCA non appliqué (pca_transformer=None)")
 
-        # Assurer que failure_soon est strictement binaire (0 ou 1)
-        if 'failure_soon' in df.columns:
-            df['failure_soon'] = (df['failure_soon'] > 0).astype(int)
+
+        #On avait ici les targets avant de drop, on les a créées avant pour éviter le leak
 
         # Drop colonnes non désirées si présentes
         drop_cols = [c for c in ['timestamp', 'equipment_id'] if c in df.columns]

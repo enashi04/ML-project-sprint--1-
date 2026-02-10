@@ -6,6 +6,7 @@ de différents modèles et leur sauvegarde.
 
 import os
 import pickle
+from pyexpat import model
 import pandas as pd
 import numpy as np
 from sklearn.metrics import accuracy_score
@@ -30,7 +31,7 @@ logger = logging.getLogger(__name__)
 
 class ModelTrainer:
     """Classe pour entraîner différents modèles de machine learning."""
-    
+    #on prend que 20% des données pour tester
     def __init__(self, data_path, models_dir="models", test_size=0.2, random_state=42, use_gpu=True):
         """
         Initialise le ModelTrainer.
@@ -199,6 +200,23 @@ class ModelTrainer:
         
         # Séparation des caractéristiques et de la cible
         X = data.drop(columns=[target_column])
+        leakage_cols = [
+            'failure_soon',
+            'time_to_failure',
+            'days_since_last_failure',
+            'failures_count_last_30days',
+            'time_in_cycle'
+        ]
+
+        # enlever toutes les colonnes "next_failure_type_*"
+        leakage_cols += [c for c in X.columns if c.startswith('next_failure_type_')]
+
+        # drop seulement celles qui existent
+        leakage_cols = [c for c in leakage_cols if c in X.columns]
+
+        logger.info(f"Suppression des colonnes leakage: {leakage_cols}")
+        X = X.drop(columns=leakage_cols)
+        
         y = data[target_column]
         
         # Vérifier la distribution des classes
@@ -206,6 +224,8 @@ class ModelTrainer:
         logger.info(f"Distribution des classes: {class_distribution.to_dict()}")
         
         # Division en ensembles d'entraînement et de test
+        print([c for c in X.columns if "failure" in c or "time" in c or "repair" in c])
+
         X_train, X_test, y_train, y_test = train_test_split(
             X, y, test_size=self.test_size, random_state=self.random_state, stratify=y
         )
@@ -276,6 +296,7 @@ class ModelTrainer:
                 logger.error(f"Erreur lors de l'entraînement du modèle {model_name}: {e}")
         
         return trained_models
+
     
     def evaluate_models(self, trained_models, X_test, y_test):
         """
@@ -323,6 +344,29 @@ class ModelTrainer:
             }
         
         return evaluation_results
+    
+    #nouvelle fonction car manquante.
+
+    def _get_scores_for_auc(self, model, X):
+        """
+        Retourne un score continu utilisable pour calculer l'AUC.
+        Priorité:
+        1) predict_proba (classe 1)
+        2) decision_function
+        3) predict (fallback)
+        """
+        if hasattr(model, "predict_proba"):
+            proba = model.predict_proba(X)
+            if proba is not None and proba.ndim == 2 and proba.shape[1] >= 2:
+                return proba[:, 1]
+
+        if hasattr(model, "decision_function"):
+            scores = model.decision_function(X)
+            return np.asarray(scores).ravel()
+
+        # Fallback: pas idéal pour AUC, mais évite de planter
+        return np.asarray(model.predict(X)).ravel()
+
     
     def save_models(self, trained_models, evaluation_results, features_info=None):
         """
@@ -528,6 +572,7 @@ def train_and_evaluate(data_path, target_column='failure_within_24h', models_to_
     
     return trained_models, evaluation_results, model_paths, best_model
 
+
 if __name__ == "__main__":
     import argparse
     
@@ -539,7 +584,7 @@ if __name__ == "__main__":
     parser.add_argument("--random_state", type=int, default=42, help="Graine aléatoire pour la reproductibilité")
     parser.add_argument("--cv", type=int, default=5, help="Nombre de plis pour la validation croisée")
     parser.add_argument("--models", type=str, nargs="+", 
-                        choices=["random_forest", "gradient_boosting", "logistic_regression", "svm"],
+                        choices=["random_forest", "gradient_boosting", "logistic_regression", "svm", "xgboost", "lightgbm"],
                         help="Modèles à entraîner (tous par défaut)")
     
     args = parser.parse_args()

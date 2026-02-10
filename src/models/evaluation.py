@@ -180,7 +180,7 @@ def plot_feature_importance(model, feature_names, top_n=20, save_path=None):
     """
     try:
         # Vérifier si le modèle a un attribut feature_importances_
-        importances = model.feature_importances_
+        importances = model.feature_importances_ #impureté de l'importance des caractéristiques.
         
         # Créer un DataFrame pour faciliter le tri
         feature_imp = pd.DataFrame({'feature': feature_names, 'importance': importances})
