@@ -4,10 +4,12 @@ import numpy as np
 import os
 from io import StringIO
 from unittest.mock import patch, mock_open
+import sys
 
 # Supposons que vous avez un module data.py qui contient des fonctions 
 # pour charger et prétraiter les données
 from data import load_data, preprocess_data, split_data, check_missing_values
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
 
 class TestDataFunctions(unittest.TestCase):

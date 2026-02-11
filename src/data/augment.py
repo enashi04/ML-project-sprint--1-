@@ -407,8 +407,8 @@ def augment_data(input_dir='cleaned_data', output_dir='augmented_data'):
         sensor_df = create_lag_features(sensor_df, lag_periods=[1, 3, 5, 10])
         
         # 4. Ajouter des indicateurs de défaillance prochaine
-        logger.info("Ajout des indicateurs de défaillance")
-        sensor_df = add_failure_indicators(sensor_df, failure_df, time_window=24)
+        # logger.info("Ajout des indicateurs de défaillance")
+        # sensor_df = add_failure_indicators(sensor_df, failure_df, time_window=24)
         
         # 5. Créer des caractéristiques de santé des composants
         logger.info("Création des caractéristiques de santé des composants")

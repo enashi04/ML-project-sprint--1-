@@ -270,8 +270,8 @@ def evaluate_model(model, X_test, y_test, class_names=None, output_dir=None):
 
 if __name__ == "__main__":
     # Exemple d'utilisation du script
-    model_path = "models/predictive_maintenance_model.pkl"
-    test_data_path = "data/processed/feature_test_data.csv"
+    model_path = "models/xgboost_20260210_104234.pkl"  # Utiliser le modèle xgboost le plus récent
+    test_data_path = "featured_data/featured_test_data.csv"  # Données de test
     output_dir = "reports/evaluation"
     
     # Charger les données et le modèle
