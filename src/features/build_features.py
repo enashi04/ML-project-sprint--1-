@@ -1,4 +1,3 @@
-#Importation des libraires
 import pandas as pd
 import numpy as np
 import os
@@ -26,6 +25,7 @@ logger = logging.getLogger('build_features')
 
 
 def _ensure_datetime(df, col='timestamp'):
+    """Assure que la colonne timestamp est au format datetime."""
     if col in df.columns and not np.issubdtype(df[col].dtype, np.datetime64):
         df = df.copy()
         df[col] = pd.to_datetime(df[col], errors='coerce')
@@ -35,27 +35,21 @@ def _ensure_datetime(df, col='timestamp'):
 def create_polynomial_features(df, degree=2):
     """
     Crée des caractéristiques polynomiales pour capturer les relations non linéaires.
-    
-    Args:
-        df (DataFrame): DataFrame avec les données de capteurs
-        degree (int): Degré du polynôme à générer
-        
-    Returns:
-        DataFrame: DataFrame avec les caractéristiques polynomiales ajoutées
+    VERSION OPTIMISÉE : utilise pd.concat pour éviter la fragmentation.
     """
     df = df.copy()
     
     # Colonnes numériques de base pour les polynômes
     base_cols = ['temperature', 'vibration', 'pressure', 'current']
     
-    # Pour chaque colonne, créer les puissances jusqu'au degré spécifié
+    # 🔥 OPTIMISATION : créer toutes les colonnes d'un coup
     new_cols = {}
     for col in base_cols:
         if col in df.columns:
             for d in range(2, degree + 1):
-                new_col_name = f'{col}_power_{d}'
-                new_cols[new_col_name] = df[col].astype(float) ** d
-
+                new_cols[f'{col}_power_{d}'] = df[col].astype(float) ** d
+    
+    # Concat une seule fois
     if new_cols:
         df = pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
     
@@ -66,155 +60,126 @@ def create_polynomial_features(df, degree=2):
 def create_cycle_features(df, equipment_ids=None):
     """
     Crée des caractéristiques basées sur les cycles d'opération des équipements.
-    
-    Args:
-        df (DataFrame): DataFrame avec les données de capteurs
-        equipment_ids (list): Liste des IDs d'équipement à traiter (None = tous)
-        
-    Returns:
-        DataFrame: DataFrame avec les caractéristiques de cycle ajoutées
+    VERSION OPTIMISÉE : utilise des Series temporaires puis concat final.
     """
     df = df.copy()
     df = _ensure_datetime(df, 'timestamp')
-        
+    
     if equipment_ids is None:
         equipment_ids = df['equipment_id'].unique()
-        
-    # Initialiser les colonnes de cycle avec des valeurs par défaut
-    # (On les crée en une fois pour éviter la fragmentation)
-    cycle_init = pd.DataFrame(
-        {
-            'cycle_id': np.nan,
-            'cycle_phase': np.nan,
-            'time_in_cycle': np.nan,
-            'cycle_duration': np.nan
-        },
-        index=df.index
-    )
-    df = pd.concat([df, cycle_init], axis=1)
-        
-    global_cycle_counter = 0
-
-    # On prépare des Series de sortie qu'on remplira, puis on concat à la fin
+    
+    # 🔥 OPTIMISATION : créer des Series temporaires
     cycle_id_s = pd.Series(np.nan, index=df.index, dtype='float64')
     cycle_phase_s = pd.Series(np.nan, index=df.index, dtype='float64')
     time_in_cycle_s = pd.Series(np.nan, index=df.index, dtype='float64')
     cycle_duration_s = pd.Series(np.nan, index=df.index, dtype='float64')
-
+    
+    global_cycle_counter = 0
+    
     for equip_id in equipment_ids:
-        # Filtrer les données pour cet équipement
-        mask = df['equipment_id'] == equip_id
-        equip_data = df.loc[mask].sort_values('timestamp')
+        equip_data = df[df['equipment_id'] == equip_id].sort_values('timestamp')
         
         if len(equip_data) == 0:
             continue
-            
-        # Détection de seuil dynamique (ex: moyenne + marge, ou simple moyenne)
+        
         if 'current' in equip_data.columns:
-            cur = equip_data['current'].astype(float)
-            base = cur.mean()
-            threshold = base * 0.5
+            current_values = equip_data['current'].values
+            threshold = np.mean(current_values) * 0.5
             
-            # État binaire : 1 = ON, 0 = OFF
-            is_running = (cur > threshold).astype(int)
+            is_running = (current_values > threshold).astype(int)
+            state_changes = np.diff(is_running, prepend=0)
+            cycle_starts = np.where(state_changes == 1)[0]
+            cycle_ends = np.where(state_changes == -1)[0]
             
-            # Détection des changements d'état (1: démarrage, -1: arrêt)
-            diffs = is_running.diff().fillna(0)
-            starts = np.where(diffs.values == 1)[0]
-            ends = np.where(diffs.values == -1)[0]
+            if len(cycle_starts) > 0 and len(cycle_ends) > 0:
+                if len(cycle_ends) > 0 and cycle_ends[0] < cycle_starts[0]:
+                    cycle_ends = cycle_ends[1:]
                 
-            # Nettoyage des indices pour avoir des paires start/end cohérentes
-            if len(starts) > 0 and len(ends) > 0:
-                if ends[0] < starts[0]:
-                    ends = ends[1:]
+                n_cycles = min(len(cycle_starts), len(cycle_ends))
                 
-                n_cycles = min(len(starts), len(ends))
-                starts = starts[:n_cycles]
-                ends = ends[:n_cycles]
-                
-                equip_index = equip_data.index.to_numpy()
-                equip_ts = equip_data['timestamp'].to_numpy()
-
-                for s_idx, e_idx in zip(starts, ends):
-                    if e_idx <= s_idx:
+                for i in range(n_cycles):
+                    start_idx = cycle_starts[i]
+                    end_idx = cycle_ends[i] if i < len(cycle_ends) else len(equip_data)
+                    
+                    if start_idx < 0 or start_idx >= len(equip_data):
                         continue
-
+                    if end_idx < 0 or end_idx > len(equip_data):
+                        continue
+                    if end_idx <= start_idx:
+                        continue
+                    
                     global_cycle_counter += 1
                     
-                    start_time = equip_ts[s_idx]
-                    end_time = equip_ts[e_idx]
-
-                    if pd.isna(start_time) or pd.isna(end_time):
-                        continue
-
-                    duration_minutes = (end_time - start_time) / np.timedelta64(1, 'm')
-                    if duration_minutes <= 0:
-                        continue
-
-                    cycle_indices = equip_index[s_idx:e_idx]
-                    if len(cycle_indices) == 0:
-                        continue
+                    start_time = equip_data.iloc[start_idx]['timestamp']
+                    end_time = equip_data.iloc[min(end_idx, len(equip_data)-1)]['timestamp']
                     
-                    current_times = df.loc[cycle_indices, 'timestamp']
-                    tic = (current_times - start_time).dt.total_seconds() / 60.0
-
+                    cycle_indices = equip_data.iloc[start_idx:end_idx].index
+                    cycle_duration = (end_time - start_time).total_seconds() / 60.0
+                    
+                    # Remplir les Series
                     cycle_id_s.loc[cycle_indices] = float(global_cycle_counter)
-                    cycle_duration_s.loc[cycle_indices] = float(duration_minutes)
-                    time_in_cycle_s.loc[cycle_indices] = tic.values
-                    cycle_phase_s.loc[cycle_indices] = (tic / duration_minutes).values
-
-    df['cycle_id'] = cycle_id_s
-    df['cycle_duration'] = cycle_duration_s
-    df['time_in_cycle'] = time_in_cycle_s
-    df['cycle_phase'] = cycle_phase_s
-
+                    cycle_duration_s.loc[cycle_indices] = float(cycle_duration)
+                    
+                    # Calculer time_in_cycle et phase pour chaque point
+                    for j in range(start_idx, min(end_idx, len(equip_data))):
+                        idx = equip_data.iloc[j].name
+                        current_time = equip_data.iloc[j]['timestamp']
+                        tic = (current_time - start_time).total_seconds() / 60.0
+                        
+                        time_in_cycle_s.loc[idx] = tic
+                        if cycle_duration > 0:
+                            cycle_phase_s.loc[idx] = tic / cycle_duration
+    
+    # 🔥 CONCAT une seule fois
+    new_cols = {
+        'cycle_id': cycle_id_s,
+        'cycle_phase': cycle_phase_s,
+        'time_in_cycle': time_in_cycle_s,
+        'cycle_duration': cycle_duration_s
+    }
+    df = pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
+    
     logger.info(f"Caractéristiques de cycle créées. Cycles totaux détectés : {global_cycle_counter}")
     return df
 
 
 def encode_categorical_features(df, method='onehot'):
-    """
-    Encode les variables catégorielles.
-    
-    Args:
-        df (DataFrame): DataFrame avec les données
-        method (str): Méthode d'encodage ('onehot' ou 'label')
-        
-    Returns:
-        DataFrame: DataFrame avec les variables catégorielles encodées
-    """
+    """Encode les variables catégorielles."""
     df = df.copy()
     
-    # Variables catégorielles à encoder
     cat_columns = ['equipment_type']
     
     if 'next_failure_type' in df.columns:
         cat_columns.append('next_failure_type')
-    
     if 'component_affected' in df.columns:
         cat_columns.append('component_affected')
     
     cat_columns = [col for col in cat_columns if col in df.columns]
-    
     encoders = {}
     
     if method == 'onehot':
-        dummies_list = []
+        # 🔥 OPTIMISATION : créer toutes les colonnes encodées puis concat
+        encoded_dfs = []
         for col in cat_columns:
             encoded = pd.get_dummies(df[col], prefix=col, drop_first=False)
-            dummies_list.append(encoded)
-            unique_values = df[col].unique().tolist()
-            encoders[col] = unique_values
+            encoded_dfs.append(encoded)
+            encoders[col] = df[col].unique().tolist()
         
-        if dummies_list:
-            df = pd.concat([df.drop(columns=cat_columns), *dummies_list], axis=1)
+        # Concat toutes les colonnes encodées d'un coup
+        if encoded_dfs:
+            df = pd.concat([df] + encoded_dfs, axis=1)
+            df = df.drop(columns=cat_columns)
     
     elif method == 'label':
+        new_cols = {}
         for col in cat_columns:
             le = LabelEncoder()
-            df[f'{col}_encoded'] = le.fit_transform(df[col].astype(str))
+            new_cols[f'{col}_encoded'] = le.fit_transform(df[col].astype(str))
             encoders[col] = le
-            df = df.drop(col, axis=1)
+        
+        if new_cols:
+            df = pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
+    
     else:
         raise ValueError("Méthode non reconnue. Utilisez 'onehot' ou 'label'.")
     
@@ -224,131 +189,157 @@ def encode_categorical_features(df, method='onehot'):
 
 def create_frequency_domain_features(df, columns=['vibration'], fs=1.0, group_by='equipment_id'):
     """
-    Crée des caractéristiques dans le domaine fréquentiel à partir des signaux temporels.
-    
-    Args:
-        df (DataFrame): DataFrame avec les données de capteurs
-        columns (list): Liste des colonnes à analyser
-        fs (float): Fréquence d'échantillonnage (Hz)
-        group_by (str): Colonne à utiliser pour le regroupement
-        
-    Returns:
-        DataFrame: DataFrame avec les caractéristiques fréquentielles ajoutées
+    Crée des caractéristiques dans le domaine fréquentiel.
+    VERSION OPTIMISÉE : utilise des Series temporaires puis concat final.
     """
     df = df.copy()
-    df = _ensure_datetime(df, 'timestamp')
-
-    feature_cols = []
-
+    
+    # 🔥 OPTIMISATION : créer des Series temporaires pour chaque feature
+    new_cols = {}
+    
     for col in columns:
         if col not in df.columns:
             logger.warning(f"Colonne {col} non trouvée, ignorée pour l'analyse fréquentielle")
             continue
-
-        per_equipment_features = {}
-
+        
+        # Initialiser les Series pour ce col
+        for suffix in ['dominant_freq', 'spectral_mean', 'spectral_std', 'spectral_kurtosis', 'spectral_skewness']:
+            new_cols[f'{col}_{suffix}'] = pd.Series(0.0, index=df.index, dtype='float64')
+        
+        # Pour chaque équipement
         for equip_id in df[group_by].unique():
             equip_data = df[df[group_by] == equip_id].sort_values('timestamp')
+            
             if len(equip_data) < 10:
                 continue
-
-            signal = equip_data[col].astype(float).fillna(0.0).values
-
+            
+            signal = equip_data[col].values
             fft_result = np.fft.rfft(signal)
             fft_freq = np.fft.rfftfreq(len(signal), d=1/fs)
             fft_magnitude = np.abs(fft_result)
-
-            dominant_freq_idx = int(np.argmax(fft_magnitude)) if len(fft_magnitude) else 0
-            dominant_freq = float(fft_freq[dominant_freq_idx]) if dominant_freq_idx < len(fft_freq) else 0.0
-
-            spectral_mean = float(np.mean(fft_magnitude)) if len(fft_magnitude) else 0.0
-            spectral_std = float(np.std(fft_magnitude)) if len(fft_magnitude) else 0.0
-            spectral_kurtosis = float(stats.kurtosis(fft_magnitude)) if len(fft_magnitude) > 3 else 0.0
-            spectral_skewness = float(stats.skew(fft_magnitude)) if len(fft_magnitude) > 2 else 0.0
-
-            per_equipment_features[equip_id] = {
-                f'{col}_dominant_freq': dominant_freq,
-                f'{col}_spectral_mean': spectral_mean,
-                f'{col}_spectral_std': spectral_std,
-                f'{col}_spectral_kurtosis': spectral_kurtosis,
-                f'{col}_spectral_skewness': spectral_skewness,
-            }
-
-        if per_equipment_features:
-            tmp = pd.DataFrame.from_dict(per_equipment_features, orient='index')
-            tmp.index.name = group_by
-            feature_cols.append(tmp)
-
-    if feature_cols:
-        all_feat = pd.concat(feature_cols, axis=1)
-        df = df.merge(all_feat, left_on=group_by, right_index=True, how='left')
-
+            
+            dominant_freq_idx = np.argmax(fft_magnitude)
+            dominant_freq = fft_freq[dominant_freq_idx] if dominant_freq_idx < len(fft_freq) else 0
+            
+            spectral_mean = np.mean(fft_magnitude)
+            spectral_std = np.std(fft_magnitude)
+            spectral_kurtosis = stats.kurtosis(fft_magnitude) if len(fft_magnitude) > 3 else 0
+            spectral_skewness = stats.skew(fft_magnitude) if len(fft_magnitude) > 2 else 0
+            
+            # Remplir les Series
+            equip_idx = equip_data.index
+            new_cols[f'{col}_dominant_freq'].loc[equip_idx] = dominant_freq
+            new_cols[f'{col}_spectral_mean'].loc[equip_idx] = spectral_mean
+            new_cols[f'{col}_spectral_std'].loc[equip_idx] = spectral_std
+            new_cols[f'{col}_spectral_kurtosis'].loc[equip_idx] = spectral_kurtosis
+            new_cols[f'{col}_spectral_skewness'].loc[equip_idx] = spectral_skewness
+    
+    # 🔥 CONCAT une seule fois
+    if new_cols:
+        df = pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
+    
     logger.info(f"Caractéristiques fréquentielles créées pour {len(columns)} colonnes")
     return df
+
+
+def reduce_dimensionality(df, n_components=None, method='pca', exclude_cols=None):
+    """Réduit la dimensionnalité des caractéristiques numériques."""
+    df = df.copy()
+    
+    numeric_cols = df.select_dtypes(include=['number']).columns.tolist()
+    
+    if exclude_cols:
+        numeric_cols = [col for col in numeric_cols if col not in exclude_cols]
+    
+    if len(numeric_cols) <= 2:
+        logger.warning("Trop peu de colonnes numériques pour la réduction de dimensions")
+        return df, None
+    
+    X = df[numeric_cols].fillna(0).copy()
+    
+    if method == 'pca':
+        if n_components is None:
+            n_components = min(len(numeric_cols) // 2, len(X) // 10)
+            n_components = max(2, n_components)
+        
+        n_components = min(n_components, len(numeric_cols), len(X))
+        
+        pca = PCA(n_components=n_components)
+        transformed = pca.fit_transform(X)
+        
+        # 🔥 OPTIMISATION : créer toutes les composantes puis concat
+        pca_cols = {}
+        for i in range(n_components):
+            pca_cols[f'pca_component_{i+1}'] = transformed[:, i]
+        
+        df = pd.concat([df, pd.DataFrame(pca_cols, index=df.index)], axis=1)
+        
+        explained_variance = sum(pca.explained_variance_ratio_)
+        logger.info(f"PCA: {n_components} composantes expliquent {explained_variance:.2%} de la variance")
+        
+        return df, pca
+    
+    else:
+        raise ValueError(f"Méthode de réduction '{method}' non supportée")
 
 
 def create_anomaly_scores(df, columns=None, window_size=20, method='zscore'):
     """
     Calcule des scores d'anomalie pour les variables sélectionnées.
-    
-    Args:
-        df (DataFrame): DataFrame avec les données de capteurs
-        columns (list): Liste des colonnes à analyser (None = toutes les numériques)
-        window_size (int): Taille de la fenêtre glissante pour la détection contextuelle
-        method (str): Méthode de calcul du score ('zscore' ou 'mahalanobis')
-        
-    Returns:
-        DataFrame: DataFrame avec les scores d'anomalie ajoutés
+    VERSION OPTIMISÉE : utilise pd.concat pour éviter la fragmentation.
     """
     df = df.copy()
-    df = _ensure_datetime(df, 'timestamp')
     
     if columns is None:
         columns = df.select_dtypes(include=['number']).columns.tolist()
-        exclude_patterns = ['_id', 'timestamp', 'failure', 'encoded', 'component', 'pca_component', '_anomaly']
+        exclude_patterns = ['_id', 'timestamp', 'failure', 'encoded', 'component', 'pca_component']
         columns = [col for col in columns if not any(pattern in col for pattern in exclude_patterns)]
     
-    if not columns:
-        logger.warning("Aucune colonne valide trouvée pour le calcul des scores d'anomalie")
-        df['anomaly_score'] = 0.0
-        return df
-    
-    df['anomaly_score'] = 0.0
-    
     if method == 'zscore':
-        scores = pd.Series(0.0, index=df.index, dtype='float64')
-
+        # 🔥 OPTIMISATION : créer toutes les colonnes d'anomalie d'un coup
+        new_cols = {}
+        global_anomaly_scores = pd.Series(0.0, index=df.index, dtype='float64')
+        
         for equip_id in df['equipment_id'].unique():
             mask = df['equipment_id'] == equip_id
-            equip = df.loc[mask].sort_values('timestamp')
-            if len(equip) < window_size:
-                continue
-
-            local_sum = pd.Series(0.0, index=equip.index, dtype='float64')
-            valid_cols = 0
-
-            for col in columns:
-                if col not in equip.columns:
-                    continue
-                x = equip[col].astype(float)
-                if x.isna().all():
-                    continue
-
-                m = x.rolling(window=window_size, min_periods=1).mean()
-                s = x.rolling(window=window_size, min_periods=1).std().replace(0, np.nan)
-                z = ((x - m) / (s + 1e-8)).abs().fillna(0.0).replace([np.inf, -np.inf], 0.0)
-
-                local_sum = local_sum.add(z, fill_value=0.0)
-                valid_cols += 1
-
-            if valid_cols > 0:
-                scores.loc[equip.index] = (local_sum / valid_cols).values
-
-        df['anomaly_score'] = scores
+            equip_data = df.loc[mask].sort_values('timestamp')
             
+            if len(equip_data) < window_size:
+                continue
+            
+            equip_idx = equip_data.index
+            anomaly_count = 0
+            
+            for col in columns:
+                if col not in equip_data.columns:
+                    continue
+                
+                rolling_mean = equip_data[col].rolling(window=window_size, min_periods=1).mean()
+                rolling_std = equip_data[col].rolling(window=window_size, min_periods=1).std()
+                rolling_std = rolling_std.replace(0, np.nan)
+                
+                z_scores = np.abs((equip_data[col] - rolling_mean) / (rolling_std + 1e-8))
+                z_scores = z_scores.fillna(0).replace([np.inf, -np.inf], 0)
+                
+                # Stocker dans le dictionnaire
+                col_name = f'{col}_anomaly'
+                if col_name not in new_cols:
+                    new_cols[col_name] = pd.Series(0.0, index=df.index, dtype='float64')
+                
+                new_cols[col_name].loc[equip_idx] = z_scores.values
+                global_anomaly_scores.loc[equip_idx] += z_scores.values
+                anomaly_count += 1
+            
+            if anomaly_count > 0:
+                global_anomaly_scores.loc[equip_idx] /= anomaly_count
+        
+        # 🔥 CONCAT UNE SEULE FOIS
+        new_cols['anomaly_score'] = global_anomaly_scores
+        df = pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
+    
     elif method == 'mahalanobis':
         logger.warning("Méthode 'mahalanobis' non implémentée dans cette version")
-        df['anomaly_score'] = 0.0
+        df = pd.concat([df, pd.DataFrame({'anomaly_score': 0.0}, index=df.index)], axis=1)
     
     else:
         raise ValueError(f"Méthode de score d'anomalie '{method}' non supportée")
@@ -360,153 +351,149 @@ def create_anomaly_scores(df, columns=None, window_size=20, method='zscore'):
 def build_features(input_dir='augmented_data', output_dir='featured_data'):
     """
     Construit des caractéristiques avancées à partir des données augmentées.
-    
-    Args:
-        input_dir (str): Répertoire contenant les données augmentées
-        output_dir (str): Répertoire pour les données avec caractéristiques avancées
-        
-    Returns:
-        DataFrame: DataFrame prêt pour l'entraînement du modèle
+    🚨 VERSION CORRIGÉE : Split AVANT création de la target pour éviter le data leakage
+    ⚡ VERSION OPTIMISÉE : Évite la fragmentation mémoire avec pd.concat
     """
     try:
-        # Création du répertoire de sortie
         os.makedirs(output_dir, exist_ok=True)
-        logger.info(f"Répertoire OK: {output_dir}")
-        
-        # Création d'un sous-répertoire pour les artifacts
         artifacts_dir = os.path.join(output_dir, 'artifacts')
         os.makedirs(artifacts_dir, exist_ok=True)
         
-        # Chargement des données augmentées
         input_data_path = os.path.join(input_dir, 'augmented_sensor_data.parquet')
-        
         logger.info(f"Chargement des données augmentées depuis {input_data_path}")
         df = pd.read_parquet(input_data_path)
-
-        # sécuriser timestamp
         df = _ensure_datetime(df, 'timestamp')
         
         # --- Construction des caractéristiques avancées ---
         
-        # 1. Caractéristiques polynomiales
         logger.info("Création des caractéristiques polynomiales")
         df = create_polynomial_features(df, degree=2)
         
-        # 2. Caractéristiques de cycle
         if len(df) > 1000:
             logger.info("Création des caractéristiques de cycle")
             df = create_cycle_features(df)
         
-        # 3. Encoder les variables catégorielles
         logger.info("Encodage des variables catégorielles")
         df, encoders = encode_categorical_features(df, method='onehot')
         dump(encoders, os.path.join(artifacts_dir, 'category_encoders.joblib'))
         
-        # 4. Caractéristiques fréquentielles
         if 'vibration' in df.columns:
             logger.info("Création des caractéristiques fréquentielles")
             df = create_frequency_domain_features(df, columns=['vibration'], fs=1.0)
         
-        # 5. Scores d'anomalie
         logger.info("Calcul des scores d'anomalie")
-        df = create_anomaly_scores(df, method='zscore')
-
-        # ============================================================
-        # MODIFICATION ANTI-LEAKAGE : SPLIT AVANT TARGET ET AVANT PCA
-        # ============================================================
-        if "equipment_id" not in df.columns:
-            raise ValueError("equipment_id manquant : impossible de split correctement")
-
-        equip_ids = df["equipment_id"].dropna().unique()
-        train_ids, test_ids = train_test_split(equip_ids, test_size=0.2, random_state=42)
-
-        train = df[df["equipment_id"].isin(train_ids)].copy()
-        test = df[df["equipment_id"].isin(test_ids)].copy()
-
-        # =========================
-        # TARGET séparée sur train/test
-        # =========================
-        for _df in (train, test):
-            if 'time_to_failure' in _df.columns:
-                _df['failure_within_24h'] = ((_df['time_to_failure'] > 0) & (_df['time_to_failure'] <= 24)).astype(int)
-                _df['time_to_failure'] = _df['time_to_failure'].fillna(0)
-            else:
-                _df['failure_within_24h'] = 0
-                _df['time_to_failure'] = 0
-
-            if 'failure_soon' in _df.columns:
-                _df['failure_soon'] = (_df['failure_soon'] > 0).astype(int)
-
-        # =========================
-        # PCA : fit sur train puis transform sur test
-        # =========================
+        df = create_anomaly_scores(df, method='zscore', window_size=20)
+        
+        # Exclure les colonnes de leakage de la PCA
         exclude_from_pca = [
-            'equipment_id', 'timestamp',
-            'failure_soon', 'time_to_failure', 'failure_within_24h',
-            'anomaly_score', 'days_since_last_failure'
+            'equipment_id', 'timestamp', 'failure_soon', 'time_to_failure', 
+            'next_failure_type', 'anomaly_score', 'days_since_last_failure',
+            'failures_count_last_30days'
         ]
-
-        numeric_cols = train.select_dtypes(include=['number']).columns.tolist()
-        numeric_cols = [c for c in numeric_cols if c not in set(exclude_from_pca)]
-
-        if len(numeric_cols) > 2:
-            logger.info("Réduction de dimensionnalité avec PCA (fit train -> transform test)")
-            X_train_pca = train[numeric_cols].fillna(0).values
-            X_test_pca = test[numeric_cols].fillna(0).values
-
-            pca_transformer = PCA(n_components=2, random_state=42)
-            Z_train = pca_transformer.fit_transform(X_train_pca)
-            Z_test = pca_transformer.transform(X_test_pca)
-
-            train["pca_component_1"] = Z_train[:, 0]
-            train["pca_component_2"] = Z_train[:, 1]
-            test["pca_component_1"] = Z_test[:, 0]
-            test["pca_component_2"] = Z_test[:, 1]
-
+        exclude_from_pca += [col for col in df.columns if col.startswith('next_failure_type_')]
+        
+        logger.info("Réduction de dimensionnalité avec PCA")
+        df, pca_transformer = reduce_dimensionality(df, n_components=5, method='pca', exclude_cols=exclude_from_pca)
+        
+        if pca_transformer:
             dump(pca_transformer, os.path.join(artifacts_dir, 'pca_transformer.joblib'))
-            logger.info(f"PCA: 2 composantes expliquent {float(np.sum(pca_transformer.explained_variance_ratio_)):.2%} de la variance")
+            logger.info(f"Variance expliquée par PCA : {sum(pca_transformer.explained_variance_ratio_):.2%}")
+        
+        # ============================================
+        # 🎯 SPLIT TEMPOREL AVANT CRÉATION DE LA TARGET
+        # ============================================
+        logger.info("Split temporel des données (80% train, 20% test)")
+        df = df.sort_values('timestamp')
+        split_idx = int(len(df) * 0.8)
+        
+        train_df = df.iloc[:split_idx].copy()
+        test_df = df.iloc[split_idx:].copy()
+        
+        split_date = train_df['timestamp'].max()
+        logger.info(f"Split effectué à la date : {split_date}")
+        logger.info(f"Train : {len(train_df)} lignes ({train_df['timestamp'].min()} à {train_df['timestamp'].max()})")
+        logger.info(f"Test : {len(test_df)} lignes ({test_df['timestamp'].min()} à {test_df['timestamp'].max()})")
+        
+        # ============================================
+        # 🎯 CRÉER LES TARGETS APRÈS LE SPLIT
+        # ============================================
+        
+        # Pour TRAIN
+        if 'time_to_failure' in train_df.columns:
+            train_df['failure_within_24h'] = ((train_df['time_to_failure'] > 0) & 
+                                             (train_df['time_to_failure'] <= 24)).astype(int)
+            train_df['time_to_failure'] = train_df['time_to_failure'].fillna(0)
         else:
-            logger.info("PCA non appliqué (pas assez de colonnes numériques)")
-            pca_transformer = None
-
+            train_df['failure_within_24h'] = 0
+            train_df['time_to_failure'] = 0
+        
+        # Pour TEST
+        if 'time_to_failure' in test_df.columns:
+            test_df['failure_within_24h'] = ((test_df['time_to_failure'] > 0) & 
+                                            (test_df['time_to_failure'] <= 24)).astype(int)
+            test_df['time_to_failure'] = test_df['time_to_failure'].fillna(0)
+        else:
+            test_df['failure_within_24h'] = 0
+            test_df['time_to_failure'] = 0
+        
+        if 'failure_soon' in train_df.columns:
+            train_df['failure_soon'] = (train_df['failure_soon'] > 0).astype(int)
+        if 'failure_soon' in test_df.columns:
+            test_df['failure_soon'] = (test_df['failure_soon'] > 0).astype(int)
+        
+        logger.info(f"Train failures (failure_within_24h=1) : {train_df['failure_within_24h'].sum()} ({train_df['failure_within_24h'].mean():.2%})")
+        logger.info(f"Test failures (failure_within_24h=1) : {test_df['failure_within_24h'].sum()} ({test_df['failure_within_24h'].mean():.2%})")
+        
         # Drop colonnes non désirées
-        drop_cols = [c for c in ['timestamp', 'equipment_id'] if c in train.columns]
+        drop_cols = ['timestamp', 'equipment_id']
+        drop_cols = [col for col in drop_cols if col in train_df.columns]
+        
         if drop_cols:
-            train = train.drop(columns=drop_cols)
-            test = test.drop(columns=drop_cols)
-
-        # Sauvegarde des données
-        output_path = os.path.join(output_dir, 'featured_data.parquet')
-        test_output_path = os.path.join(output_dir, 'featured_test_data.parquet')
-        train.to_parquet(output_path, index=False)
-        test.to_parquet(test_output_path, index=False)
-
-        csv_output_path = os.path.join(output_dir, 'featured_data.csv')
-        test_csv_output_path = os.path.join(output_dir, 'featured_test_data.csv')
-        train.to_csv(csv_output_path, index=False)
-        test.to_csv(test_csv_output_path, index=False)
-
-        logger.info(f"Données avec caractéristiques avancées sauvegardées dans {output_dir}")
-        logger.info(f"Train: {train.shape} | Test: {test.shape}")
-
-        # Rapport features
-        full_df = pd.concat([train, test], axis=0, ignore_index=True)
-
+            logger.info(f"Suppression des colonnes : {drop_cols}")
+            train_df = train_df.drop(columns=drop_cols)
+            test_df = test_df.drop(columns=drop_cols)
+        
+        # Sauvegarde
+        logger.info("Sauvegarde des données...")
+        train_df.to_parquet(os.path.join(output_dir, 'featured_train_data.parquet'), index=False)
+        test_df.to_parquet(os.path.join(output_dir, 'featured_test_data.parquet'), index=False)
+        train_df.to_csv(os.path.join(output_dir, 'featured_train_data.csv'), index=False)
+        test_df.to_csv(os.path.join(output_dir, 'featured_test_data.csv'), index=False)
+        
+        # Pour compatibilité
+        train_df.to_csv(os.path.join(output_dir, 'featured_data.csv'), index=False)
+        
+        logger.info(f"✅ Données sauvegardées dans {output_dir}")
+        logger.info(f"Nombre total de caractéristiques : {train_df.shape[1]}")
+        
+        # Rapport
         feature_report = {
             "date_creation": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "nb_lignes": len(full_df),
-            "nb_caracteristiques": full_df.shape[1],
-            "memoire_utilisation_mb": full_df.memory_usage().sum() / 1024 / 1024,
-            "pct_valeurs_manquantes": full_df.isnull().mean().mean() * 100,
-            "nb_caracteristiques_polynomiales": len([col for col in full_df.columns if 'power_' in col]),
-            "nb_caracteristiques_cycle": len([col for col in full_df.columns if col in ['cycle_id', 'cycle_phase', 'time_in_cycle', 'cycle_duration']]),
-            "nb_caracteristiques_frequentielles": len([col for col in full_df.columns if 'spectral_' in col or 'dominant_freq' in col]),
-            "nb_composantes_pca": len([col for col in full_df.columns if 'pca_component_' in col])
+            "nb_lignes_train": len(train_df),
+            "nb_lignes_test": len(test_df),
+            "nb_caracteristiques": train_df.shape[1],
+            "train_positive_rate": float(train_df['failure_within_24h'].mean()),
+            "test_positive_rate": float(test_df['failure_within_24h'].mean()),
+            "memoire_utilisation_train_mb": train_df.memory_usage().sum() / 1024 / 1024,
+            "memoire_utilisation_test_mb": test_df.memory_usage().sum() / 1024 / 1024,
+            "pct_valeurs_manquantes_train": train_df.isnull().mean().mean() * 100,
+            "pct_valeurs_manquantes_test": test_df.isnull().mean().mean() * 100,
+            "nb_caracteristiques_polynomiales": len([col for col in train_df.columns if 'power_' in col]),
+            "nb_caracteristiques_cycle": len([col for col in train_df.columns if col in ['cycle_id', 'cycle_phase', 'time_in_cycle', 'cycle_duration']]),
+            "nb_caracteristiques_frequentielles": len([col for col in train_df.columns if 'spectral_' in col or 'dominant_freq' in col]),
+            "nb_composantes_pca": len([col for col in train_df.columns if 'pca_component_' in col])
         }
-
+        
         pd.DataFrame([feature_report]).to_csv(os.path.join(output_dir, 'feature_report.csv'), index=False)
-
-        return full_df
+        
+        logger.info("\n" + "="*60)
+        logger.info("RÉSUMÉ DU FEATURE ENGINEERING")
+        logger.info("="*60)
+        for key, value in feature_report.items():
+            logger.info(f"{key}: {value}")
+        logger.info("="*60 + "\n")
+        
+        return train_df, test_df
     
     except Exception as e:
         logger.error(f"Erreur lors de la construction des caractéristiques: {str(e)}")
@@ -514,9 +501,17 @@ def build_features(input_dir='augmented_data', output_dir='featured_data'):
 
 
 if __name__ == "__main__":
-    featured_df = build_features()
+    train_df, test_df = build_features()
 
-    print("\nRésumé des données avec caractéristiques avancées:")
-    print(f"Dimensions: {featured_df.shape}")
-    print("\nAperçu des colonnes:")
-    print(featured_df.columns.tolist()[:10])
+    print("\n" + "="*60)
+    print("RÉSUMÉ DES DONNÉES AVEC CARACTÉRISTIQUES AVANCÉES")
+    print("="*60)
+    print(f"\nTRAIN:")
+    print(f"  Dimensions: {train_df.shape}")
+    print(f"  Colonnes (10 premières): {train_df.columns.tolist()[:10]}")
+    print(f"  Failures: {train_df['failure_within_24h'].sum()} ({train_df['failure_within_24h'].mean():.2%})")
+    
+    print(f"\nTEST:")
+    print(f"  Dimensions: {test_df.shape}")
+    print(f"  Failures: {test_df['failure_within_24h'].sum()} ({test_df['failure_within_24h'].mean():.2%})")
+    print("="*60)
