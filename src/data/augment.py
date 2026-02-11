@@ -98,7 +98,6 @@ def create_lag_features(df, lag_periods=[1, 3, 5, 10], group_by='equipment_id'):
     if not numeric_cols:
         return df
 
-    
     # Pour chaque période de lag
     for lag in lag_periods:
         # Pour chaque colonne numérique
@@ -189,7 +188,6 @@ def create_component_health_features(sensor_df, failure_df):
     sensor_df['failures_count_last_30days'] = 0
     
     # Pour chaque équipement unique
-   # Pour chaque équipement
     for equipment_id in sensor_df['equipment_id'].unique():
         # Sous-ensembles capteurs / pannes pour cet équipement
         eq_mask = sensor_df['equipment_id'] == equipment_id
@@ -204,9 +202,9 @@ def create_component_health_features(sensor_df, failure_df):
             continue
 
         # --- 1) Days since last failure ---
-        # Idée : pour chaque ligne capteur, trouver la dernière panne STRICTEMENT avant timestamp
+        #trouver la dernière panne avant chaque timestamp de capteur 
         last_failure_times = []
-
+        #failure times pour l'équipement
         failure_times = eq_failures['failure_timestamp'].values
 
         for ts in eq_sensor['timestamp'].values:
@@ -256,7 +254,8 @@ def feature_scaling(df, method='standard', exclude_cols=None):
     
     # Identifier les colonnes numériques
     numeric_cols = df.select_dtypes(include=['number']).columns.tolist()
-    #Exclure les colonnes identifiées.
+
+    #Exclure les colonnes identifiées qui peuvent fausser l'apprentissage.
     exclude = {"equipment_id", "timestamp", "failure_soon", "time_to_failure", "next_failure_type"}
     if exclude_cols:
         exclude |= set(exclude_cols)
@@ -383,6 +382,7 @@ def augment_data(input_dir='cleaned_data', output_dir='augmented_data'):
             os.makedirs(viz_dir)
         
         # Chargement des données nettoyées
+        # print(f"Input dir est {input_dir}")
         sensor_data_path = os.path.join(input_dir, 'clean_sensor_data.parquet')
         failure_data_path = os.path.join(input_dir, 'clean_failure_data.parquet')
         
