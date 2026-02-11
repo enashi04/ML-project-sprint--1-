@@ -6,13 +6,14 @@ utiliser et surveiller un modèle de prédiction des risques de défaillance ind
 """
 
 # Import des modules de monitoring
-from .data_drift import check_drift  # À ajuster selon les fonctions réelles
-from .performance_tracking import track_performance  # À ajuster selon les fonctions réelles
+# from data_drift import check_drift  # À ajuster selon les fonctions réelles
+from data_drift import detect_drift
+from performance_tracking import track_performance  # À ajuster selon les fonctions réelles
 
 __all__ = [
-    
     # Modules de monitoring
-    'check_drift',  # À ajuster selon les fonctions réelles
+    # 'check_drift',  # À ajuster selon les fonctions réelles
+    'detect_drift',
     'track_performance'  # À ajuster selon les fonctions réelles
 ]
 
