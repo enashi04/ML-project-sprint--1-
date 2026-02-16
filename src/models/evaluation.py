@@ -1,3 +1,5 @@
+import pickle
+
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -7,6 +9,15 @@ from sklearn.metrics import confusion_matrix, roc_curve, precision_recall_curve,
 from sklearn.metrics import classification_report, average_precision_score
 import joblib
 import os
+
+def find_latest_model(models_dir="models", model_type=None):
+    model_files = [f for f in os.listdir(models_dir) if f.endswith(".pkl")]
+    if model_type:
+        model_files = [f for f in model_files if f.startswith(f"{model_type}_")]
+    if not model_files:
+        return None
+    model_files.sort(key=lambda x: os.path.getmtime(os.path.join(models_dir, x)), reverse=True)
+    return os.path.join(models_dir, model_files[0])
 
 
 def load_test_data(test_data_path):
@@ -42,8 +53,16 @@ def load_model(model_path):
         model: Modèle chargé
     """
     try:
-        model = joblib.load(model_path)
-        return model
+        with open(model_path, "rb") as f:
+            model_data = pickle.load(f)
+
+        # Ton train_model sauvegarde un dict {model, parameters, evaluation, ...}
+        if isinstance(model_data, dict) and "model" in model_data:
+            return model_data["model"]
+
+        # fallback: si jamais c'est un objet modèle direct
+        return model_data
+
     except Exception as e:
         print(f"Erreur lors du chargement du modèle: {e}")
         return None
@@ -270,7 +289,14 @@ def evaluate_model(model, X_test, y_test, class_names=None, output_dir=None):
 
 if __name__ == "__main__":
     # Exemple d'utilisation du script
-    model_path = "models/xgboost_20260210_104234.pkl"  # Utiliser le modèle xgboost le plus récent
+    # model_path = "models/xgboost_20260210_104234.pkl"  # Utiliser le modèle xgboost le plus récent
+    models_dir = "models"
+    model_path = find_latest_model(models_dir=models_dir, model_type="xgboost")  # dernier xgboost
+    print(f"Modèle trouvé pour l'évaluation: {model_path}")
+
+    if model_path is None:
+        raise SystemExit("Aucun modèle xgboost trouvé dans models/")
+
     test_data_path = "featured_data/featured_test_data.csv"  # Données de test
     output_dir = "reports/evaluation"
     

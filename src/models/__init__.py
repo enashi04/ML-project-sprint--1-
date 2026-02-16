@@ -7,9 +7,9 @@ utiliser un modèle de prédiction des risques de défaillance industrielle.
 
 import os
 import sys
-from train_model import train_and_evaluate
-from predict_model import PredictionEngine
-from evaluation import evaluate_model
+from .train_model import train_and_evaluate
+from .predict_model import PredictionEngine
+from .evaluation import evaluate_model
 
 # Ajouter le chemin du dossier 'features' au sys.path
 features_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "features"))

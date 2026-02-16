@@ -76,6 +76,7 @@ class DataDriftMonitor:
                 }
                 
         return stats
+
         
     def detect_drift(self, new_data: pd.DataFrame) -> Dict:
         """
@@ -87,6 +88,8 @@ class DataDriftMonitor:
         Returns:
             Rapport de drift contenant les résultats des tests et métriques
         """
+
+
         drift_report = {
             'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             'sample_size': len(new_data),
@@ -163,9 +166,10 @@ class DataDriftMonitor:
             if feature_report['drift_detected']:
                 features_with_drift += 1
         
+      
         # Déterminer s'il y a un drift global
-
-        drift_report['overall_drift_detected'] = drift_report['drift_percentage'] > 0.1  # Seuil arbitraire
+        drift_report["drift_percentage"] = features_with_drift / max(1, len(drift_report["features"]))
+        drift_report["overall_drift_detected"] = drift_report["drift_percentage"] > 0.1  # Seuil arbitraire
         
         # Sauvegarder le rapport
         self._save_report(drift_report)
@@ -328,3 +332,17 @@ def generate_drift_report(reference_data: pd.DataFrame,
         monitor.visualize_drift(current_data, top_n=top_features)
     
     return drift_report
+
+def check_data_drift(reference_data: pd.DataFrame,
+                     current_data: pd.DataFrame,
+                     threshold: float = 0.05,
+                     output_dir: str = "drift_reports") -> Dict:
+    """
+    Wrapper simple pour compatibilité avec wandb_tracking.py
+    """
+    return compare_datasets(
+        reference_data=reference_data,
+        current_data=current_data,
+        threshold=threshold,
+        output_dir=output_dir
+    )

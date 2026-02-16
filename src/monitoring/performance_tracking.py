@@ -99,10 +99,10 @@ class ModelPerformanceTracker:
             Dictionnaire des métriques calculées
         """
         metrics = {
-            'accuracy': 
-            'precision': 
-            'recall': 
-            'f1': 
+            'accuracy': accuracy_score(y_true, y_pred),
+            'precision': precision_score(y_true, y_pred, average='weighted', zero_division=0),
+            'recall': recall_score(y_true, y_pred, average='weighted', zero_division=0),
+            'f1': f1_score(y_true, y_pred, average='weighted', zero_division=0)
         }
         
         # Classification binaire avec probabilités
@@ -306,9 +306,9 @@ class ModelPerformanceTracker:
         """
         # Calculer les métriques actuelles
         if self.is_classification:
-            current_metrics = 
+            current_metrics = self._calculate_classification_metrics(y_true, y_pred, y_prob) 
         else:
-            current_metrics = 
+            current_metrics = self._calculate_regression_metrics(y_true, y_pred) 
         
         # Si pas de baseline, on ne peut pas comparer
         if not self.baseline_metrics:
@@ -323,7 +323,7 @@ class ModelPerformanceTracker:
             'model_version': self.model_version,
             'sample_size': len(y_true),
             'current_metrics': current_metrics,
-            'comparison': comparison
+            'comparison': self._compare_metrics(current_metrics)
         }
         
         # Sauvegarder le rapport
@@ -350,4 +350,4 @@ class ModelPerformanceTracker:
         elif y_true is not None and y_pred is not None:
             # Calculer les métriques selon le type de modèle
             if self.is_classification:
-                self.baseline_metrics = self._calculate_classification_metrics(y_true, y_pred, y_prob
+                self.baseline_metrics = self._calculate_classification_metrics(y_true, y_pred, y_prob if y_prob is not None else None)

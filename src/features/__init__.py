@@ -26,13 +26,13 @@ featured_data = build_features(
 """
 import os 
 
-from build_features import (
+from .build_features import (
     build_features,
     create_polynomial_features,
     create_cycle_features,
     encode_categorical_features,
     create_frequency_domain_features,
-    reduce_dimensionality,
+    reduce_dimensionality_train_test,
     create_anomaly_scores
 )
 
@@ -42,7 +42,7 @@ __all__ = [
     'create_cycle_features',
     'encode_categorical_features',
     'create_frequency_domain_features',
-    'reduce_dimensionality',
+    'reduce_dimensionality_train_test',
     'create_anomaly_scores'
 ]
 

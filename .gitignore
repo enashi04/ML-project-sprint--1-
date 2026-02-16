@@ -33,6 +33,7 @@ data/validation/*
 
 #pkl
 *.pkl
+*.json
 
 #log
 *.log
@@ -41,3 +42,8 @@ data/validation/*
 #image
 *.png
 
+#log wandb
+*.wandb
+
+*.txt
+*.yaml

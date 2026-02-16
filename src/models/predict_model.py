@@ -170,13 +170,13 @@ class PredictionEngine:
         logger.info("Prétraitement des données pour la prédiction")
         
         # Vérifier que le modèle est chargé
-        if not self.model or not self.features_info:
-            logger.error("Modèle non chargé ou informations sur les caractéristiques manquantes")
+        if self.model is None:
+            logger.error("Modèle non chargé")
             return None
         
         try:
             # Liste des caractéristiques attendues
-            expected_features = self.features_info.get('feature_names', [])
+            expected_features = self.features_info.get('feature_names', []) if self.features_info else []
             
             if not expected_features:
                 logger.warning("Informations sur les caractéristiques manquantes")
@@ -184,10 +184,9 @@ class PredictionEngine:
                 cols = [c for c in data.columns if c not in ['equipment_id', 'timestamp', 'prediction_timestamp']]
                 expected_features = cols  
 
-            
-            # Vérifier les caractéristiques manquantes
-            missing_features = [feature for feature in data.columns if feature not in data.columns]
-            extra_features = [feature for feature in data.columns if feature not in expected_features and feature not in ['equipment_id','timestamp']]
+            # ✅ FIX: missing_features doit comparer expected_features VS data.columns
+            missing_features = [f for f in expected_features if f not in data.columns]
+            extra_features = [c for c in data.columns if c not in expected_features and c not in ['equipment_id', 'timestamp']]
 
             if missing_features:
                 logger.warning(f"Caractéristiques manquantes: {missing_features}")
@@ -203,16 +202,20 @@ class PredictionEngine:
 
             data_processed = ( 
                 data_processed
-                .replace([np.inf, -np.inf],np.nan)
+                .replace([np.inf, -np.inf], np.nan)
                 .fillna(0)
             )
             
-            #sécurité si y'a des booleans
+            # sécurité si y'a des booleans
             for col in data_processed.columns: 
-                if data_processed[col].dtype=='bool':
-                    data_processed[col]=data_processed[col].astype(int)
+                if data_processed[col].dtype == 'bool':
+                    data_processed[col] = data_processed[col].astype(int)
             
-            #conversion non numériques à voir
+            # conversion non numériques à voir
+            # ✅ FIX: coercition safe en numérique si jamais il reste des objets/strings
+            for col in data_processed.columns:
+                if not pd.api.types.is_numeric_dtype(data_processed[col]):
+                    data_processed[col] = pd.to_numeric(data_processed[col], errors="coerce").fillna(0)
 
             logger.info(f"Données prétraitées: {data_processed.shape} échantillons, {data_processed.shape[1]} caractéristiques")
             return data_processed
@@ -251,8 +254,17 @@ class PredictionEngine:
             has_equipment_id = 'equipment_id' in data.columns
             equipment_ids = data['equipment_id'].copy() if has_equipment_id else None
             
-            # Effectuer les prédictions
-            y_pred_proba = self.model.predict_proba(X)[:, 1]
+            # ✅ FIX: fallback si pas de predict_proba
+            if hasattr(self.model, "predict_proba"):
+                y_pred_proba = self.model.predict_proba(X)[:, 1]
+            elif hasattr(self.model, "decision_function"):
+                scores = self.model.decision_function(X)
+                scores = (scores - scores.min()) / (scores.max() - scores.min() + 1e-9)
+                y_pred_proba = scores
+            else:
+                # fallback worst-case
+                y_pred_proba = self.model.predict(X).astype(float)
+
             y_pred = (y_pred_proba >= threshold).astype(int)
             
             # Créer le DataFrame des résultats
@@ -285,22 +297,23 @@ class PredictionEngine:
 
         Returns : 
         array : niveau de risque """
-        try :
-            proba= np.asarray(probabilities, dtype=float)
-            proba=np.clip(proba, 0.0,1.0)
+        try:
+            proba = np.asarray(probabilities, dtype=float)
+            proba = np.clip(proba, 0.0, 1.0)
 
-            #découpage en quantile
-            quantiles = np.linspace(0,1,levels+1)
+            # découpage en quantile
+            quantiles = np.linspace(0, 1, levels + 1)
             bins = np.quantile(proba, quantiles)
 
-            #si on a des proba constantesn on veut éviter les bins
-            bins = np.nuique(bins)
-            if len(bins)<=2:
-                bins=np.linspace(0,1,levels+1)
+            # si on a des proba constantes on veut éviter les bins
+            # ✅ FIX: np.unique + gestion bins trop courts
+            bins = np.unique(bins)
+            if len(bins) <= 2:
+                bins = np.linspace(0, 1, levels + 1)
 
-            #risque
-            risk = np.digitize(proba, bins[1:-1], right=True) +1
-            risk=np.clip(risk, 1, levels)
+            # risque
+            risk = np.digitize(proba, bins[1:-1], right=True) + 1
+            risk = np.clip(risk, 1, levels)
 
             return risk
 
@@ -367,6 +380,7 @@ if __name__ == "__main__":
     parser.add_argument("--input_path", type=str, required=True, help="Chemin vers les nouvelles données (csv/parquet/json)")
     parser.add_argument("--output_path", type=str, default=None, help="Chemin de sortie pour les prédictions (csv)")
     parser.add_argument("--best", action="store_true", help="Utiliser le meilleur modèle du dossier models_dir")
+    # ✅ tu peux étendre si tu veux, mais je ne change pas ta structure
     parser.add_argument("--metric", type=str, default="auc", choices=["auc", "accuracy"], help="Métrique pour best model")
     parser.add_argument("--threshold", type=float, default=0.5, help="Seuil pour predicted_failure")
     parser.add_argument("--risk_levels", type=int, default=5, help="Nombre de niveaux de risque (ex: 5)")

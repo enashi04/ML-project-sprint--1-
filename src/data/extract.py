@@ -95,3 +95,19 @@ if __name__ == "__main__":
     
     print("\nAperçu des données de défaillance:")
     print(failure_df.head())
+
+def load_raw_data(sensor_path: str, failure_path: str, output_dir: str = "extracted_data") -> dict:
+    """
+    Charge les fichiers CSV capteurs + pannes et sauvegarde en parquet dans output_dir.
+    Retourne un dict avec les DataFrames.
+    (Fonction "compat prof" utilisée par wandb_tracking.py)
+    """
+    os.makedirs(output_dir, exist_ok=True)
+
+    sensor_df = pd.read_csv(sensor_path)
+    failure_df = pd.read_csv(failure_path)
+
+    sensor_df.to_parquet(os.path.join(output_dir, "sensor_data.parquet"), index=False)
+    failure_df.to_parquet(os.path.join(output_dir, "failure_data.parquet"), index=False)
+
+    return {"sensor_data": sensor_df, "failure_data": failure_df}

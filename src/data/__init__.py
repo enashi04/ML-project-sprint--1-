@@ -28,9 +28,9 @@ import logging
 from datetime import datetime
 
 # Import des fonctions principales de chaque module
-from extract import extract_data
-from clean import clean_data
-from augment import augment_data
+from .extract import extract_data
+from .clean import clean_data
+from .augment import augment_data
 
 # Configuration du logging
 logging.basicConfig(
