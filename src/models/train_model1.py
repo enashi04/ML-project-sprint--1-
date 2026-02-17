@@ -474,3 +474,154 @@ if __name__ == "__main__":
         random_state=args.random_state,
         cv=args.cv
     )
+
+# new functions/update to add in train_model.py
+
+#import pour l'oversampling
+from imblearn.over_sampling import SMOTE, ADASYN, RandomOberSampler
+from  imblearn.under_sampling import RandomUnderSampler
+from imblearn.combine import SMOTEENN, SMOTETomek
+
+class ModelTrainer:
+    def __init__(self, ..., sampling_strategy=None):
+        # ...
+        self.sampling_strategy = sampling_strategy
+        
+    def apply_sampling(self, X_train, y_train):
+        """Applique une stratégie de rééchantillonnage si spécifiée."""
+        if self.sampling_strategy is None:
+            return X_train, y_train
+            
+        logger.info(f"Application du rééchantillonnage: {self.sampling_strategy}")
+        
+        if self.sampling_strategy == 'smote':
+            sampler = SMOTE(random_state=self.random_state)
+        elif self.sampling_strategy == 'adasyn':
+            sampler = ADASYN(random_state=self.random_state)
+        elif self.sampling_strategy == 'oversample':
+            sampler = RandomOverSampler(sampling_strategy=0.1, random_state=self.random_state)  # 10% au lieu de 50%
+        elif self.sampling_strategy == 'undersample':
+            sampler = RandomUnderSampler(sampling_strategy=0.5, random_state=self.random_state)
+        elif self.sampling_strategy == 'smoteenn':
+            sampler = SMOTEENN(random_state=self.random_state)
+        else:
+            logger.warning(f"Stratégie inconnue: {self.sampling_strategy}")
+            return X_train, y_train
+            
+        X_resampled, y_resampled = sampler.fit_resample(X_train, y_train)
+        
+        logger.info(f"Avant rééchantillonnage: {y_train.value_counts().to_dict()}")
+        logger.info(f"Après rééchantillonnage: {pd.Series(y_resampled).value_counts().to_dict()}")
+        
+        return X_resampled, y_resampled
+
+#metriques pour déséquilibre extrême
+def evaluate_models(self, trained_models, X_test, y_test):
+    """nouvelle version avec métriques pour déséquilibre extrême."""
+    evaluation_results = {}
+    
+    for model_name, model_info in trained_models.items():
+        model = model_info['model']
+        
+        # ... code.
+        
+        # Métriques supplémentaires importantes
+        from sklearn.metrics import precision_recall_curve, matthews_corrcoef
+        
+        # Courbe Precision-Recall
+        precision_curve, recall_curve, thresholds = precision_recall_curve(y_test, y_pred_proba)
+        
+        # Seuil optimal (maximise F1)
+        f1_scores = 2 * (precision_curve * recall_curve) / (precision_curve + recall_curve + 1e-9)
+        optimal_idx = np.argmax(f1_scores)
+        optimal_threshold = thresholds[optimal_idx] if optimal_idx < len(thresholds) else 0.5
+        
+        # Prédictions avec seuil optimal
+        y_pred_optimal = (y_pred_proba >= optimal_threshold).astype(int)
+        
+        # Matthews Correlation Coefficient (excellent pour déséquilibre)
+        mcc = matthews_corrcoef(y_test, y_pred_optimal)
+        
+        # Spécificité (important en déséquilibre)
+        tn, fp, fn, tp = conf_matrix.ravel()
+        specificity = tn / (tn + fp) if (tn + fp) > 0 else 0
+        
+        evaluation_results[model_name] = {
+            # ... métriques existantes ...
+            'mcc': mcc,
+            'specificity': specificity,
+            'optimal_threshold': optimal_threshold,
+            'precision_at_optimal': precision_curve[optimal_idx],
+            'recall_at_optimal': recall_curve[optimal_idx]
+        }
+        
+        logger.info(f"MCC: {mcc:.4f} | Spécificité: {specificity:.4f}")
+        logger.info(f"Seuil optimal: {optimal_threshold:.4f}")
+
+#entrainement du model
+
+def train_models(self, X_train, y_train, models_to_train=None, cv=3):
+    # validation stratifié, on remplace le cv3 pour etre sur d'avoir assez d'échantillon par fold
+    from sklearn.model_selection import StratifiedKFold
+    
+    skf = StratifiedKFold(n_splits=min(cv, 5), shuffle=True, random_state=self.random_state)
+
+    grid_search = GridSearchCV(
+        estimator=model,
+        param_grid=model_info['params'],
+        cv=skf,  # Au lieu de cv=cv
+        scoring='average_precision',
+        n_jobs=self.n_jobs,
+        verbose=1
+    )
+
+#in init, il faut ajuster les grilles de parametres
+# Dans __init__, ajustez vos grilles de paramètres :
+'xgboost': {
+    'model': xgb.XGBClassifier(
+        tree_method='hist',
+        random_state=random_state,
+        eval_metric='aucpr',  # Changez de logloss à aucpr
+        nthread=self.n_jobs
+    ),
+    'params': {
+        'n_estimators': [300, 500],
+        'learning_rate': [0.01, 0.05],  #+ petit
+        'max_depth': [3, 5, 7],
+        'subsample': [0.8, 1.0],
+        'colsample_bytree': [0.8, 1.0],
+        'min_child_weight': [3, 5, 7],  
+        'reg_alpha': [0, 0.1],  # Régularisation L1
+        'reg_lambda': [1, 2]    # Régularisation L2
+    }
+}
+
+#ajouter le SMOTE
+def train_and_evaluate(data_path, target_column='failure_within_24h', 
+                      sampling_strategy='smote',  # Nouveau paramètre
+                      **kwargs):
+    trainer = ModelTrainer(
+        data_path=data_path,
+        sampling_strategy=sampling_strategy,
+        **kwargs
+    )
+    
+    #  jusqu'à X_train, y_train 
+    
+    # Appliquer le rééchantillonnage
+    X_train_resampled, y_train_resampled = trainer.apply_sampling(X_train, y_train)
+    
+    trained_models = trainer.train_models(
+        X_train=X_train_resampled,
+        y_train=y_train_resampled,
+        **kwargs
+    )
+    
+    # Évaluer sur les vraies données de test pas rééchantillonné
+    evaluation_results = trainer.evaluate_models(
+        trained_models=trained_models,
+        X_test=X_test,
+        y_test=y_test
+    )
+
+
