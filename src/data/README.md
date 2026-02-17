@@ -10,7 +10,7 @@ Ce module gère toute la **chaîne data** du projet :
 
 ## Fichiers
 - `extract.py`  
-Ce fichier permet d'extraire les données depuis la source (les fichiers de capteurs et de défaillances) 
+Ce fichier permet d'extraire les données depuis la source (les fichiers de capteurs et de défaillances).   
   Sortie : dataset brut normalisé au format attendu par `clean.py`.
 
 - `clean.py`  
