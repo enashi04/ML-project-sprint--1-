@@ -75,7 +75,6 @@ class ModelTrainer:
         self.use_gpu = bool(use_gpu and GPU_AVAILABLE)
 
         # Grilles "safe" pour éviter de faire freezer la machine
-        # -> tu peux élargir après validation
         if self.use_gpu:
             self.models = {
                 'xgboost': {
@@ -216,7 +215,7 @@ class ModelTrainer:
     def _drop_leakage_columns(self, X, target_column):
         """
         Supprime les colonnes qui fuient de l'information (futur / post-évènement).
-        IMPORTANT: on ne doit jamais drop la cible elle-même (elle n'est pas dans X ici).
+        IMPORTANT: jamais drop la cible elle-même (elle n'est pas dans X ici).
         """
         leak_cols = []
 
