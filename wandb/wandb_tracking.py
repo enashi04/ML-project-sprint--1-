@@ -19,21 +19,18 @@ import matplotlib.pyplot as plt
 from sklearn.metrics import confusion_matrix, roc_curve, precision_recall_curve
 import seaborn as sns
 
-# Ajout du répertoire parent dans le PYTHONPATH pour les imports relatifs
+# Ajout du répertoire parent 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # Imports depuis les différents modules du projet
-# NOTE: dans TON projet, on a extract_data / clean_data / augment_data / build_features(input_dir, output_dir)
 from src.data.extract import extract_data
 from src.data.clean import clean_data
 from src.data.augment import augment_data
 from src.features.build_features import build_features
 from src.models.train_model import train_and_evaluate
 
-# (OPTIONNEL) si tu l’utilises encore, sinon tu peux enlever
 # from src.models.evaluation import evaluate_model
 
-# Drift + tracking perf : selon ton projet ça peut varier => on garde en "best effort"
 try:
     from src.monitoring.data_drift import compare_datasets
 except Exception:
@@ -87,7 +84,7 @@ class WandbExperimentTracker:
             except Exception as e:
                 print(f"W&B login warning: {e}")
         else:
-            # Si tu veux forcer un mode offline quand pas de login:
+            #mode offline si pas de clé W&B
             # os.environ["WANDB_MODE"] = "offline"
             pass
 
@@ -99,9 +96,6 @@ class WandbExperimentTracker:
             group=self.group,
             job_type=self.job_type,
             name=run_name,
-            # IMPORTANT:
-            # - Avant: reinit=True (bool) -> warning W&B
-            # - Maintenant: "finish_previous" (string) pour éviter le warning
             reinit="finish_previous"
         )
         print(f"Started wandb run: {self.run.name}")
@@ -159,11 +153,11 @@ class WandbExperimentTracker:
             if data is not None:
                 # Enregistrement de données Python
                 if isinstance(data, pd.DataFrame):
-                    # Pour un DataFrame pandas
+                    # DF pandas
                     table = wandb.Table(dataframe=data)
                     artifact.add(table, "data_table")
                 elif isinstance(data, dict):
-                    # Pour un dictionnaire
+                    # Dictionnaire
                     with artifact.new_file("data.json", mode="w") as f:
                         json.dump(data, f)
 
@@ -182,7 +176,6 @@ class WandbExperimentTracker:
             model_path (str, optional): Chemin où le modèle est sauvegardé.
             metadata (dict, optional): Métadonnées supplémentaires sur le modèle.
         """
-        # Si le modèle n'est pas déjà sauvegardé, nous l'enregistrons temporairement
         temp_created = False
         if not model_path:
             import joblib
@@ -202,7 +195,7 @@ class WandbExperimentTracker:
         self.run.log_artifact(artifact)
         self.artifacts[model_name] = artifact
 
-        # Supprimer le fichier temporaire si nous l'avons créé
+        # Supprimer le fichier temporaire if created
         if temp_created and os.path.exists(model_path):
             os.remove(model_path)
 
@@ -398,7 +391,7 @@ class WandbExperimentTracker:
             self.run.log({"correlation_matrix": wandb.Image(plt)})
             plt.close()
 
-            # Log du tableau de données (attention: peut être énorme)
+            # Log du tableau de données 
             self.run.log({"correlation_data": wandb.Table(dataframe=correlation_matrix.reset_index())})
 
         except Exception as e:
@@ -475,9 +468,6 @@ def _drift_report_to_scores(drift_report: dict) -> dict:
     if not isinstance(drift_report, dict):
         return scores
 
-    # On supporte plusieurs formats possibles (selon ton module)
-    # - drift_report["features"][feat]["p_value"] ...
-    # - drift_report["feature_drift"][feat]["drift_score"] ...
     features = drift_report.get("features") or drift_report.get("feature_drift") or {}
     if isinstance(features, dict):
         for feat, rep in features.items():
@@ -515,13 +505,11 @@ def main():
         "featured_dir": "featured_data",
         "models_dir": "models",
 
-        # ✅ demandé: passer en logistic regression
+        #logistic regression
         "model_type": "logistic_regression",
         "random_state": 42,
         "test_size": 0.2,
 
-        # Gardé pour compat “structure prof”
-        # (⚠️ dans TON build_features, tu ne passes pas ces params => on les laisse mais on ne les utilise pas)
         "feature_engineering": {
             "use_rolling_stats": True,
             "window_size": 5,
@@ -529,7 +517,7 @@ def main():
             "lag_values": [1, 2, 3]
         },
 
-        # (OPTIONNEL) SMOTE plus tard:
+        # SMOTE:
         # "sampling": {"method": "smote", "k_neighbors": 5}
     }
 
@@ -594,7 +582,7 @@ def main():
                 path=featured_test_csv
             )
 
-        # Charger pour stats + drift + courbes
+        # chargement 
         train_df = pd.read_csv(featured_train_csv)
         test_df = pd.read_csv(featured_test_csv) if os.path.exists(featured_test_csv) else None
 
@@ -609,7 +597,7 @@ def main():
                 "missing_values_test": int(test_df.isna().sum().sum())
             })
 
-        # Matrice de corrélation sur sample (sinon trop gros)
+        # Matrice de corrélation sur sample 
         numerical_cols = train_df.select_dtypes(include=["number"]).columns.tolist()
         if numerical_cols:
             sample_corr = train_df[numerical_cols].sample(
@@ -631,7 +619,6 @@ def main():
             test_size=config["test_size"],
             random_state=config["random_state"],
             cv=3,
-            # NOTE: dans ton train_and_evaluate tu as aussi use_gpu/n_jobs/sample_rows/test_path, etc.
             # use_gpu=False,
             # n_jobs=1,
             # sample_rows=None,
@@ -648,11 +635,6 @@ def main():
         best_model_obj = trained_models[best_model]["model"]
         best_model_path = model_paths.get(best_model)
 
-        # ------------------------------------------------------------
-        # IMPORTANT: Fix de ton erreur "Feature names unseen at fit time"
-        # => on re-aligne X_test sur les features EXACTES vues au fit.
-        # On lit features_info depuis le .pkl sauvegardé.
-        # ------------------------------------------------------------
         feature_names_fit = None
         if best_model_path and os.path.exists(best_model_path):
             try:
@@ -675,8 +657,7 @@ def main():
 
             X_test = X_test.replace((np.inf, -np.inf, np.nan), 0)
 
-            # ✅ Align exact sur les features du modèle (sinon erreur)
-            # (Si jamais features_info absent, fallback: align sur train_df features sans target)
+            # alignement sur les features 
             if feature_names_fit:
                 # Ajouter les colonnes manquantes à 0
                 for c in feature_names_fit:
@@ -701,17 +682,17 @@ def main():
                 experiment.log_roc_curve(y_test, y_prob, model_name=best_model)
                 experiment.log_precision_recall_curve(y_test, y_prob, model_name=best_model)
 
-            # Feature importance si possible
+            # Feature importance 
             try:
                 feat_names_for_log = feature_names_fit or list(X_test.columns)
                 experiment.log_feature_importance(best_model_obj, feat_names_for_log, model_name=best_model)
             except Exception as e:
                 print(f"Feature importance warning: {e}")
 
-            # Drift train vs test (si module dispo)
+            # Drift train vs test 
             if compare_datasets is not None:
                 try:
-                    # On construit X_train de référence aligné pareil
+                    # X aligné sur features du modèle
                     if "failure_within_24h" in train_df.columns:
                         X_ref = train_df.drop(columns=["failure_within_24h"]).replace((np.inf, -np.inf, np.nan), 0)
                     else:
@@ -737,10 +718,9 @@ def main():
                 except Exception as e:
                     print(f"Drift warning: {e}")
             else:
-                # NOTE: si tu veux, on peut mettre un drift simple ici (moyennes/std) mais je n’invente pas sans ton module.
                 pass
 
-            # Tracking perf (si classe dispo)
+            # Tracking perf 
             if ModelPerformanceTracker is not None:
                 try:
                     perf_tracker = ModelPerformanceTracker(
@@ -748,8 +728,6 @@ def main():
                         model_version="v1",
                         is_classification=True
                     )
-                    # Selon ta classe, ça peut être track_performance(...) ou add_metrics(...)
-                    # On tente track_performance, sinon on ignore.
                     if hasattr(perf_tracker, "track_performance"):
                         perf_tracker.track_performance(
                             y_true=np.array(y_test),
@@ -758,7 +736,7 @@ def main():
                             dataset_name="test"
                         )
                     elif hasattr(perf_tracker, "add_metrics"):
-                        # fallback si ta classe fonctionne comme ça
+                        # fallback 
                         perf_tracker.add_metrics(best_metrics)
 
                     if hasattr(perf_tracker, "save_history"):
@@ -766,7 +744,7 @@ def main():
                 except Exception as e:
                     print(f"Performance tracking warning: {e}")
 
-        # Log du modèle comme artefact (on log le .pkl produit par save_models)
+        # Log du modèle comme artefact .pkl
         if best_model_path and os.path.exists(best_model_path):
             experiment.log_artifact(
                 artifact_name=f"{best_model}_model",
