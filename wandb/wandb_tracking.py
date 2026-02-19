@@ -1,13 +1,3 @@
-"""
-wandb_tracking.py
-
-NOTE:
-- Je garde la **structure + commentaires** de la prof (classe WandbExperimentTracker + main()).
-- J’adapte juste le pipeline à TON projet (extract_data -> clean_data -> augment_data -> build_features -> train_and_evaluate).
-- Je corrige aussi l’erreur que tu as eue:
-  "The feature names should match those that were passed during fit"
-  => on aligne X_test EXACTEMENT sur les features utilisées à l’entraînement (features_info du modèle sauvegardé).
-"""
 
 import os
 import sys
@@ -506,7 +496,7 @@ def main():
         "models_dir": "models",
 
         #logistic regression
-        "model_type": "logistic_regression",
+        "model_type": "xgboost",  # ou "logistic_regression", "random_forest", etc.
         "random_state": 42,
         "test_size": 0.2,
 
