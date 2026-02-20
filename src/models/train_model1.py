@@ -12,12 +12,21 @@ from sklearn.model_selection import train_test_split, GridSearchCV
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.svm import SVC
-from sklearn.metrics import classification_report, confusion_matrix, roc_auc_score
+from sklearn.metrics import (
+    classification_report, confusion_matrix, roc_auc_score, accuracy_score,
+    precision_score, recall_score, f1_score, average_precision_score
+)
 import logging
-import joblib
 from datetime import datetime
 import xgboost as xgb
 import lightgbm as lgb
+#ajout de smote
+try:
+    from imblearn.over_sampling import SMOTE
+    IMBLEARN_AVAILABLE = True
+except ImportError:
+    SMOTE = None
+    IMBLEARN_AVAILABLE = False
 
 # Configuration du logging
 logging.basicConfig(
@@ -30,7 +39,19 @@ logger = logging.getLogger(__name__)
 class ModelTrainer:
     """Classe pour entraîner différents modèles de machine learning."""
     
-    def __init__(self, data_path, models_dir="models", test_size=0.2, random_state=42, use_gpu=True):
+    def __init__(
+        self,
+        data_path,
+        models_dir="models",
+        test_size=0.2,
+        random_state=42,
+        use_gpu=False,
+        n_jobs=1,
+        safe_mode=True,
+        use_smote=False,
+        smote_sampling_strategy=0.2, #minoritaire = 20% de la majorité
+        smote_k_neighbors=5
+    ):
         """
         Initialise le ModelTrainer.
         
@@ -44,79 +65,255 @@ class ModelTrainer:
         self.models_dir = models_dir
         self.test_size = test_size
         self.random_state = random_state
-        
+        self.n_jobs = n_jobs
+        self.safe_mode = safe_mode
+        #ajout smote
+        self.use_smote = bool(use_smote and IMBLEARN_AVAILABLE)
+        self.smote_sampling_strategy = smote_sampling_strategy
+        self.smote_k_neighbors = smote_k_neighbors
+
+        if use_smote and not IMBLEARN_AVAILABLE:
+            logger.warning("imblearn n'est pas disponible -> SMOTE désactivé. "
+                           "Installe: pip install imbalanced-learn")
+
         # Création du répertoire pour les modèles s'il n'existe pas
         if not os.path.exists(models_dir):
             os.makedirs(models_dir)
 
-        # Option 1: avec RAPIDS cuML (si disponible)
+        # Détection RAPIDS cuML
         try:
-            import cuml
+            import cuml  # noqa: F401
             from cuml.ensemble import RandomForestClassifier as cuRF
-            from cuml.linear_model import LogisticRegression as cuLR
-            from cuml.svm import SVC as cuSVC
             GPU_AVAILABLE = True
         except ImportError:
             GPU_AVAILABLE = False
-            print("RAPIDS cuML n'est pas disponible, utilisation des CPU fallbacks")
+            cuRF = None
+            logger.info("RAPIDS cuML n'est pas disponible, utilisation des CPU fallbacks")
 
-        self.use_gpu = use_gpu and GPU_AVAILABLE
-        
+        self.use_gpu = bool(use_gpu and GPU_AVAILABLE)
+
+        # Grille pour éviter de faire planter l'ordi
         if self.use_gpu:
             self.models = {
-                'random_forest': {
-                    'model': cuRF(random_state=random_state),
-                    'params': {
-                        'n_estimators': [100, 200, 300],
-                        'max_depth': [None, 10, 20, 30],
-                        'min_samples_split': [2, 5, 10]
-                    }
-                },
-                # Autres modèles GPU...
                 'xgboost': {
-                    'model': xgb.XGBClassifier(tree_method='gpu_hist', gpu_id=0, random_state=random_state),
+                    'model': xgb.XGBClassifier(
+                        tree_method='gpu_hist',
+                        gpu_id=0,
+                        random_state=random_state,
+                        eval_metric='logloss'
+                    ),
                     'params': {
-                        'n_estimators': [100, 200],
-                        'learning_rate': [0.01, 0.1, 0.2],
-                        'max_depth': [3, 5, 7]
+                        'n_estimators': [200],
+                        'learning_rate': [0.05, 0.1],
+                        'max_depth': [3, 5],
+                        'subsample': [0.8, 1.0],
+                        'colsample_bytree': [0.8, 1.0]
                     }
                 },
                 'lightgbm': {
                     'model': lgb.LGBMClassifier(device='gpu', random_state=random_state),
                     'params': {
-                        'n_estimators': [100, 200],
-                        'learning_rate': [0.01, 0.1, 0.2],
-                        'num_leaves': [31, 50, 100]
+                        'n_estimators': [300],
+                        'learning_rate': [0.05, 0.1],
+                        'num_leaves': [31, 63]
+                    }
+                },
+            }
+
+            # Optionnel: cuML RF si dispo (mais attention RAM GPU)
+            if cuRF is not None:
+                self.models['random_forest'] = {
+                    'model': cuRF(random_state=random_state),
+                    'params': {
+                        'n_estimators': [200],
+                        'max_depth': [10, 20],
+                        # WARNING: cuML ne supporte pas tous les params sklearn
+                        # 'min_samples_split': [2, 5]
                     }
                 }
-            }
 
         else:
             self.models = {
-                
+                'logistic_regression': {
+                    'model': LogisticRegression(
+                        random_state=random_state,
+                        max_iter=3000,
+                        n_jobs=self.n_jobs,
+                        solver='lbfgs',
+                        class_weight='balanced'  # IMPORTANT: dataset déséquilibré
+                    ),
+                    'params': {
+                        'C': [0.1, 1.0, 10.0]
+                    }
+                },
+                'random_forest': {
+                    'model': RandomForestClassifier(
+                        random_state=random_state,
+                        n_jobs=self.n_jobs,
+                        class_weight='balanced'  # IMPORTANT: dataset déséquilibré
+                    ),
+                    'params': {
+                        'n_estimators': [200],
+                        'max_depth': [None, 10, 20],
+                        'min_samples_split': [2, 5]
+                    }
+                },
+                'gradient_boosting': {
+                    'model': GradientBoostingClassifier(random_state=random_state),
+                    'params': {
+                        'n_estimators': [200],
+                        'learning_rate': [0.05, 0.1],
+                        'max_depth': [3, 5]
+                    }
+                },
+                'svm': {
+                    'model': SVC(
+                        random_state=random_state,
+                        probability=True,
+                        class_weight='balanced'  # IMPORTANT: dataset déséquilibré
+                    ),
+                    'params': {
+                        'C': [1.0, 2.0],
+                        'kernel': ['rbf', 'linear']
+                    }
+                },
+                'xgboost': {
+                    'model': xgb.XGBClassifier(
+                        tree_method='hist',
+                        random_state=random_state,
+                        eval_metric='logloss',
+                        nthread=self.n_jobs  # <- évite d'utiliser tous les coeurs par surprise
+                    ),
+                    'params': {
+                        'n_estimators': [300],
+                        'learning_rate': [0.05, 0.1],
+                        'max_depth': [3, 5],
+                        'subsample': [0.8, 1.0],
+                        'colsample_bytree': [0.8, 1.0]
+                    }
+                },
+                'lightgbm': {
+                    'model': lgb.LGBMClassifier(device='cpu', random_state=random_state),
+                    'params': {
+                        'n_estimators': [300],
+                        'learning_rate': [0.05, 0.1],
+                        'num_leaves': [31, 63]
+                    }
+                }
             }
         
-    def load_data(self):
+    def load_data(self, sample_rows=None):
         """Charge les données prétraitées depuis le chemin spécifié."""
         logger.info(f"Chargement des données depuis {self.data_path}")
         try:
             data = pd.read_csv(self.data_path)
             logger.info(f"Données chargées avec succès: {data.shape} échantillons")
+
+            # Optionnel: tester sur un sous-ensemble pour éviter de faire planter le PC
+            if sample_rows is not None and sample_rows > 0 and sample_rows < len(data):
+                data = data.sample(n=sample_rows, random_state=self.random_state)
+                logger.warning(f"Mode sample activé: utilisation de {sample_rows} lignes")
+
             return data
         except Exception as e:
             logger.error(f"Erreur lors du chargement des données: {e}")
             raise
+
+    def _compute_scale_pos_weight(self, y):
+        """
+        Calcule un poids de classe pour XGBoost/LightGBM: nb_negatifs / nb_positifs
+        """
+        y = pd.Series(y).astype(int)
+        n_pos = int((y == 1).sum())
+        n_neg = int((y == 0).sum())
+        if n_pos == 0:
+            return 1.0
+        return n_neg / n_pos
+
+    def _drop_leakage_columns(self, X, target_column):
+        """
+        Supprime les colonnes qui fuient de l'information (futur / post-évènement).
+        IMPORTANT: jamais drop la cible elle-même (elle n'est pas dans X ici).
+        """
+        leak_cols = []
+
+        # Cible "future" (dérivée de time_to_failure) -> enlever toutes colonnes qui donnent le futur
+        if target_column == 'failure_within_24h':
+            if 'time_to_failure' in X.columns:
+                leak_cols.append('time_to_failure')
+            if 'failure_soon' in X.columns:
+                leak_cols.append('failure_soon')
+            leak_cols += [c for c in X.columns if c.startswith("next_failure_type_")]
+            leak_cols += [c for c in X.columns if c.startswith("component_affected_")]
+
+        # Cible "failure_soon" -> enlever time_to_failure et les infos "panne suivante"
+        if target_column == 'failure_soon':
+            if 'time_to_failure' in X.columns:
+                leak_cols.append('time_to_failure')
+            leak_cols += [c for c in X.columns if c.startswith("next_failure_type_")]
+            leak_cols += [c for c in X.columns if c.startswith("component_affected_")]
+
+        if leak_cols:
+            leak_cols = sorted(set(leak_cols))
+            logger.warning(f"Colonnes supprimées pour éviter fuite de label: {leak_cols}")
+            X = X.drop(columns=[c for c in leak_cols if c in X.columns])
+
+        return X
+    
+    def _sanitize_X_y(self, X, y):
+        """
+        Nettoie X/y : supprime colonnes non numériques, remplace NaN/inf, cast y en int.
+        """
+        # Sécurité: retirer toute colonne non numérique si jamais il en reste
+        non_numeric = [c for c in X.columns if not pd.api.types.is_numeric_dtype(X[c])]
+        if non_numeric:
+            logger.warning(f"Colonnes non numériques supprimées (sécurité): {non_numeric}")
+            X = X.drop(columns=non_numeric)
+
+        X = X.replace((np.inf, -np.inf, np.nan), 0)
+        y = pd.Series(y).replace((np.inf, -np.inf, np.nan), 0).astype(int)
+
+        return X, y
+
+# Nlle fonctinos pour smote 
+    def _apply_smote_if_enabled(self, X_train, y_train):
+        """
+        Applique SMOTE uniquement sur l'ensemble d'entraînement.
+        IMPORTANT: ne JAMAIS appliquer SMOTE sur le test.
+        """
+        if not self.use_smote:
+            return X_train, y_train
+
+        try:
+            # NOTE: SMOTE n'accepte pas toujours les DataFrames avec index "bizarres", on reset index
+            X_train = X_train.reset_index(drop=True)
+            y_train = pd.Series(y_train).reset_index(drop=True)
+
+            smote = SMOTE(
+                sampling_strategy=self.smote_sampling_strategy,
+                k_neighbors=self.smote_k_neighbors,
+                random_state=self.random_state
+            )
+
+            X_res, y_res = smote.fit_resample(X_train, y_train)
+
+            # On reconvertit en DataFrame pour garder les noms de colonnes
+            X_res = pd.DataFrame(X_res, columns=X_train.columns)
+            y_res = pd.Series(y_res)
+
+            before = dict(pd.Series(y_train).value_counts())
+            after = dict(pd.Series(y_res).value_counts())
+            logger.info(f"SMOTE appliqué (train uniquement). Classes avant: {before} | après: {after}")
+
+            return X_res, y_res
+
+        except Exception as e:
+            logger.warning(f"SMOTE a échoué, oversampling désactivé pour ce run: {e}")
+            return X_train, y_train
             
     def prepare_train_test_data(self, data, target_column='failure_within_24h'):
         """
         Prépare les ensembles d'entraînement et de test.
-        
-        Args:
-            data (DataFrame): DataFrame contenant les données prétraitées
-            target_column (str): Nom de la colonne cible
-            
-        Returns:
-            tuple: (X_train, X_test, y_train, y_test)
         """
         logger.info("Préparation des ensembles d'entraînement et de test")
         
@@ -127,8 +324,12 @@ class ModelTrainer:
         # Séparation des caractéristiques et de la cible
         X = data.drop(columns=[target_column])
         y = data[target_column]
-        
+
+        # éviter fuite de données
+        X = self._drop_leakage_columns(X, target_column)
+
         # Vérifier la distribution des classes
+        X, y = self._sanitize_X_y(X, y)
         class_distribution = y.value_counts(normalize=True)
         logger.info(f"Distribution des classes: {class_distribution.to_dict()}")
         
@@ -137,34 +338,90 @@ class ModelTrainer:
             X, y, test_size=self.test_size, random_state=self.random_state, stratify=y
         )
         
-        X_train = X_train.replace((np.inf, -np.inf, np.nan), 0).reset_index(drop=True)
-        X_test = X_test.replace((np.inf, -np.inf, np.nan), 0).reset_index(drop=True)
-        y_train = y_train.replace((np.inf, -np.inf, np.nan), 0).reset_index(drop=True)
-        y_test = y_test.replace((np.inf, -np.inf, np.nan), 0).reset_index(drop=True)
-
+        X_train = X_train.reset_index(drop=True)
+        X_test = X_test.reset_index(drop=True)
+        y_train = pd.Series(y_train).reset_index(drop=True)
+        y_test = pd.Series(y_test).reset_index(drop=True)
 
         logger.info(f"Ensemble d'entraînement: {X_train.shape} échantillons")
         logger.info(f"Ensemble de test: {X_test.shape} échantillons")
+
+        # après split, uniquement sur train
+        X_train, y_train = self._apply_smote_if_enabled(X_train, y_train)
+
+        # Calcul du scale_pos_weight (utile pour XGB/LGBM)
+        spw = self._compute_scale_pos_weight(y_train)
+        logger.info(f"scale_pos_weight (neg/pos) calculé sur train: {spw:.2f}")
         
         return X_train, X_test, y_train, y_test
+
+    def prepare_train_test_data_from_files(self, train_df, test_df, target_column='failure_within_24h'):
+        """
+        Prépare train/test quand on a déjà un split temporel (train + test séparés).
+        IMPORTANT: appliquer le même nettoyage/leakage drop que prepare_train_test_data !
+        """
+        logger.info("Préparation des ensembles d'entraînement et de test (split temporel: fichiers séparés)")
+
+        if target_column not in train_df.columns:
+            raise ValueError(f"La colonne cible '{target_column}' n'existe pas dans le TRAIN")
+        if target_column not in test_df.columns:
+            raise ValueError(f"La colonne cible '{target_column}' n'existe pas dans le TEST")
+
+        X_train = train_df.drop(columns=[target_column])
+        y_train = train_df[target_column]
+        X_test = test_df.drop(columns=[target_column])
+        y_test = test_df[target_column]
+
+        # éviter la fuite de label sur train et test
+        X_train = self._drop_leakage_columns(X_train, target_column)
+        X_test = self._drop_leakage_columns(X_test, target_column)
+
+        #les colonnes entre train et test 
+        X_train, y_train = self._sanitize_X_y(X_train, y_train)
+        X_test, y_test = self._sanitize_X_y(X_test, y_test)
+
+        # Si colonnes différentes -> on aligne (colonnes manquantes = 0)
+        X_train, X_test = X_train.align(X_test, join='left', axis=1, fill_value=0)
+
+        # Sécurité: si test a des colonnes que train n'a pas, on les drop
+        extra_in_test = [c for c in X_test.columns if c not in X_train.columns]
+        if extra_in_test:
+            logger.warning(f"Colonnes présentes uniquement dans le TEST supprimées: {extra_in_test}")
+            X_test = X_test.drop(columns=extra_in_test)
+
+        X_train = X_train.reset_index(drop=True)
+        X_test = X_test.reset_index(drop=True)
+        y_train = pd.Series(y_train).astype(int).reset_index(drop=True)
+        y_test = pd.Series(y_test).astype(int).reset_index(drop=True)
+
+        # Logs distribution classes
+        class_distribution_train = y_train.value_counts(normalize=True)
+        class_distribution_test = y_test.value_counts(normalize=True)
+        logger.info(f"Distribution des classes (train): {class_distribution_train.to_dict()}")
+        logger.info(f"Distribution des classes (test): {class_distribution_test.to_dict()}")
+
+        logger.info(f"Ensemble d'entraînement (split temporel): {X_train.shape} échantillons")
+        logger.info(f"Ensemble de test (split temporel): {X_test.shape} échantillons")
+
+        #on ajoute le smote pour le train uniquement
+        X_train, y_train = self._apply_smote_if_enabled(X_train, y_train)
+
+        spw = self._compute_scale_pos_weight(y_train)
+        logger.info(f"scale_pos_weight (neg/pos) calculé sur train: {spw:.2f}")
+
+        return X_train, X_test, y_train, y_test
     
-    def train_models(self, X_train, y_train, models_to_train=None, cv=5):
+    def train_models(self, X_train, y_train, models_to_train=None, cv=3):
         """
         Entraîne les modèles spécifiés avec recherche d'hyperparamètres.
-        
-        Args:
-            X_train (DataFrame): Caractéristiques d'entraînement
-            y_train (Series): Cibles d'entraînement
-            models_to_train (list): Liste des modèles à entraîner (None pour tous)
-            cv (int): Nombre de plis pour la validation croisée
-            
-        Returns:
-            dict: Dictionnaire des modèles entraînés
         """
         if models_to_train is None:
             models_to_train = list(self.models.keys())
         
         trained_models = {}
+
+        # Poids classe pour XGB/LGBM
+        scale_pos_weight = self._compute_scale_pos_weight(y_train)
         
         for model_name in models_to_train:
             if model_name not in self.models:
@@ -173,14 +430,23 @@ class ModelTrainer:
                 
             logger.info(f"Entraînement du modèle: {model_name}")
             model_info = self.models[model_name]
+            model = model_info['model']
+
+            # Injecter le scale_pos_weight quand c'est pertinent
+            if model_name in ("xgboost", "lightgbm"):
+                try:
+                    model.set_params(scale_pos_weight=scale_pos_weight)
+                    logger.info(f"{model_name}: scale_pos_weight={scale_pos_weight:.2f} appliqué")
+                except Exception as e:
+                    logger.warning(f"Impossible d'appliquer scale_pos_weight sur {model_name}: {e}")
             
             # Recherche des meilleurs hyperparamètres
             grid_search = GridSearchCV(
-                estimator=model_info['model'],
+                estimator=model,
                 param_grid=model_info['params'],
                 cv=cv,
-                scoring='roc_auc',
-                n_jobs=-1,
+                scoring='average_precision',  # mieux que roc_auc en dataset déséquilibré
+                n_jobs=self.n_jobs,          # <- IMPORTANT: éviter n_jobs=-1 si ça freeze
                 verbose=1
             )
             
@@ -191,7 +457,7 @@ class ModelTrainer:
                 best_score = grid_search.best_score_
                 
                 logger.info(f"Meilleurs paramètres pour {model_name}: {best_params}")
-                logger.info(f"Meilleur score de validation croisée (AUC): {best_score:.4f}")
+                logger.info(f"Meilleur score de validation croisée (PR-AUC): {best_score:.4f}")
                 
                 trained_models[model_name] = {
                     'model': best_model,
@@ -208,16 +474,9 @@ class ModelTrainer:
         """
         Évalue les modèles entraînés sur l'ensemble de test.
         test_data.csv
-        Args:
-            trained_models (dict): Modèles entraînés
-            X_test (DataFrame): Caractéristiques de test
-            y_test (Series): Cibles de test
-            
-        Returns:
-            dict: Résultats d'évaluation
         """
         evaluation_results = {}
-        from sklearn.metrics import accuracy_score, confusion_matrix, classification_report, roc_auc_score
+        
         for model_name, model_info in trained_models.items():
             model = model_info['model']
             
@@ -225,20 +484,40 @@ class ModelTrainer:
             
             # Prédictions
             y_pred = model.predict(X_test)
-            y_pred_proba = model.predict_proba(X_test)[:, 1]
+
+            # Probabilités (si disponibles)
+            if hasattr(model, "predict_proba"):
+                y_pred_proba = model.predict_proba(X_test)[:, 1]
+            elif hasattr(model, "decision_function"):
+                scores = model.decision_function(X_test)
+                scores = (scores - scores.min()) / (scores.max() - scores.min() + 1e-9)
+                y_pred_proba = scores
+            else:
+                y_pred_proba = y_pred.astype(float)
             
             # Métriques
             accuracy = accuracy_score(y_test, y_pred)
             conf_matrix = confusion_matrix(y_test, y_pred)
-            class_report = classification_report(y_test, y_pred)
+            class_report = classification_report(y_test, y_pred, zero_division=0)
             auc_score = roc_auc_score(y_test, y_pred_proba)
+
+            precision = precision_score(y_test, y_pred, zero_division=0)
+            recall = recall_score(y_test, y_pred, zero_division=0)
+            f1 = f1_score(y_test, y_pred, zero_division=0)
+            pr_auc = average_precision_score(y_test, y_pred_proba)
             
             logger.info(f"Précision sur l'ensemble de test: {accuracy:.4f}")
             logger.info(f"AUC sur l'ensemble de test: {auc_score:.4f}")
+            logger.info(f"PR-AUC sur l'ensemble de test: {pr_auc:.4f}")
+            logger.info(f"Precision: {precision:.4f} | Recall: {recall:.4f} | F1: {f1:.4f}")
             logger.info(f"Matrice de confusion:\n{conf_matrix}")
             
             evaluation_results[model_name] = {
                 'accuracy': accuracy,
+                'precision': precision,
+                'recall': recall,
+                'f1': f1,
+                'pr_auc': pr_auc,
                 'confusion_matrix': conf_matrix,
                 'classification_report': class_report,
                 'auc': auc_score
@@ -249,14 +528,6 @@ class ModelTrainer:
     def save_models(self, trained_models, evaluation_results, features_info=None):
         """
         Sauvegarde les modèles entraînés et leurs résultats d'évaluation.
-        
-        Args:
-            trained_models (dict): Modèles entraînés
-            evaluation_results (dict): Résultats d'évaluation
-            features_info (dict): Informations sur les caractéristiques utilisées
-            
-        Returns:
-            dict: Chemins des modèles sauvegardés
         """
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         model_paths = {}
@@ -286,129 +557,66 @@ class ModelTrainer:
             except Exception as e:
                 logger.error(f"Erreur lors de la sauvegarde du modèle {model_name}: {e}")
         
-        # Sauvegarder un fichier récapitulatif
-        summary_path = os.path.join(self.models_dir, f"training_summary_{timestamp}.pkl")
-        try:
-            summary_data = {
-                'models': list(trained_models.keys()),
-                'evaluation_summary': {model: {'auc': eval_info['auc'], 'accuracy': eval_info['accuracy']} 
-                                      for model, eval_info in evaluation_results.items()},
-                'timestamp': timestamp,
-                'features_info': features_info
-            }
-            with open(summary_path, 'wb') as f:
-                pickle.dump(summary_data, f)
-            logger.info(f"Résumé de l'entraînement sauvegardé à {summary_path}")
-        except Exception as e:
-            logger.error(f"Erreur lors de la sauvegarde du résumé d'entraînement: {e}")
-        
         return model_paths
     
     def find_best_model(self, evaluation_results, metric='auc'):
         """
         Trouve le meilleur modèle selon la métrique spécifiée.
-        
-        Args:
-            evaluation_results (dict): Résultats d'évaluation
-            metric (str): Métrique à utiliser ('auc' ou 'accuracy')
-            
-        Returns:
-            str: Nom du meilleur modèle
         """
-        scores = {model_name: results[metric] for model_name, results in evaluation_results.items()}
+        if metric not in ("auc", "pr_auc", "f1", "recall", "accuracy"):
+            logger.warning(f"Métrique '{metric}' non reconnue, fallback sur 'auc'")
+            metric = "auc"
+
+        scores = {m: evaluation_results[m].get(metric, float("-inf")) for m in evaluation_results.keys()}
         best_model = max(scores, key=scores.get)
         logger.info(f"Meilleur modèle selon {metric}: {best_model} avec un score de {scores[best_model]:.4f}")
         return best_model
-        
-    def save_feature_importance(self, trained_models, feature_names, top_n=20):
-        """
-        Sauvegarde l'importance des caractéristiques pour les modèles qui le supportent.
-        
-        Args:
-            trained_models (dict): Modèles entraînés
-            feature_names (list): Noms des caractéristiques
-            top_n (int): Nombre de caractéristiques importantes à sauvegarder
-        """
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        
-        for model_name, model_info in trained_models.items():
-            model = model_info['model']
-            
-            # Vérifier si le modèle a un attribut feature_importances_
-            if hasattr(model, 'feature_importances_'):
-                importances = model.feature_importances_
-                indices = np.argsort(importances)[::-1]
-                
-                # Préparer un DataFrame des importances
-                top_indices = indices[:top_n]
-                importance_df = pd.DataFrame({
-                    'Feature': [feature_names[i] for i in top_indices],
-                    'Importance': importances[top_indices]
-                })
-                
-                # Sauvegarder en CSV
-                importance_path = os.path.join(
-                    self.models_dir, 
-                    f"{model_name}_feature_importance_{timestamp}.csv"
-                )
-                importance_df.to_csv(importance_path, index=False)
-                logger.info(f"Importance des caractéristiques pour {model_name} sauvegardée à {importance_path}")
-            
-            elif hasattr(model, 'coef_'):
-                # Pour les modèles linéaires
-                coefs = model.coef_[0] if model.coef_.ndim > 1 else model.coef_
-                indices = np.argsort(np.abs(coefs))[::-1]
-                
-                # Préparer un DataFrame des coefficients
-                top_indices = indices[:top_n]
-                coef_df = pd.DataFrame({
-                    'Feature': [feature_names[i] for i in top_indices],
-                    'Coefficient': coefs[top_indices]
-                })
-                
-                # Sauvegarder en CSV
-                coef_path = os.path.join(
-                    self.models_dir, 
-                    f"{model_name}_coefficients_{timestamp}.csv"
-                )
-                coef_df.to_csv(coef_path, index=False)
-                logger.info(f"Coefficients pour {model_name} sauvegardés à {coef_path}")
+
 
 def train_and_evaluate(data_path, target_column='failure_within_24h', models_to_train=None, 
-                      models_dir="models", test_size=0.2, random_state=42, cv=5):
+                    models_dir="models", test_size=0.2, random_state=42, cv=5, use_gpu=False, n_jobs=1, sample_rows=None, test_path=None,
+                    # ✅ AJOUT (SMOTE) : paramètres optionnels
+                    use_smote=False, smote_sampling_strategy=0.2, smote_k_neighbors=5):
     """
     Fonction principale pour entraîner et évaluer les modèles.
-    
-    Args:
-        data_path (str): Chemin vers les données prétraitées
-        target_column (str): Nom de la colonne cible
-        models_to_train (list): Liste des modèles à entraîner
-        models_dir (str): Répertoire pour sauvegarder les modèles
-        test_size (float): Proportion des données pour le test
-        random_state (int): Graine aléatoire pour la reproductibilité
-        cv (int): Nombre de plis pour la validation croisée
-        
-    Returns:
-        tuple: (trained_models, evaluation_results, model_paths)
     """
-    # Initialiser le ModelTrainer
     trainer = ModelTrainer(
         data_path=data_path,
         models_dir=models_dir,
         test_size=test_size,
-        random_state=random_state
+        random_state=random_state,
+        use_smote=use_smote,
+        smote_sampling_strategy=smote_sampling_strategy,
+        smote_k_neighbors=smote_k_neighbors
     )
-    
-    # Charger les données
-    data = trainer.load_data()
-    
-    # Préparer les ensembles d'entraînement et de test
-    X_train, X_test, y_train, y_test = trainer.prepare_train_test_data(
-        data=data,
-        target_column=target_column
-    )
-    
-    # Entraîner les modèles
+
+    # Si test_path est fourni (ou détecté), on utilise split temporel
+    # Sinon fallback: train_test_split classique
+    if test_path is None:
+        # Détection automatique: si un fichier *_test_data.csv existe à côté de data_path
+        base, ext = os.path.splitext(data_path)
+        candidate = f"{base.replace('featured_data', 'featured_data')}_test_data{ext}"
+        if os.path.exists(candidate):
+            test_path = candidate
+
+    if test_path is not None and os.path.exists(test_path):
+        logger.info(f"Split temporel détecté -> TRAIN={data_path} | TEST={test_path}")
+        train_df = pd.read_csv(data_path)
+        test_df = pd.read_csv(test_path)
+
+        X_train, X_test, y_train, y_test = trainer.prepare_train_test_data_from_files(
+            train_df=train_df,
+            test_df=test_df,
+            target_column=target_column
+        )
+    else:
+        #on commente pour l'instant
+        data = trainer.load_data(sample_rows=sample_rows)
+        X_train, X_test, y_train, y_test = trainer.prepare_train_test_data(
+            data=data,
+            target_column=target_column
+        )
+
     trained_models = trainer.train_models(
         X_train=X_train,
         y_train=y_train,
@@ -416,212 +624,67 @@ def train_and_evaluate(data_path, target_column='failure_within_24h', models_to_
         cv=cv
     )
     
-    # Évaluer les modèles
     evaluation_results = trainer.evaluate_models(
         trained_models=trained_models,
         X_test=X_test,
         y_test=y_test
     )
     
-    # Trouver le meilleur modèle
-    best_model = trainer.find_best_model(evaluation_results)
+    best_model = trainer.find_best_model(evaluation_results, metric="pr_auc")
     
-    # Informations sur les caractéristiques
     features_info = {
         'feature_names': list(X_train.columns),
         'n_features': X_train.shape[1]
     }
     
-    # Sauvegarder les modèles et les résultats
     model_paths = trainer.save_models(
         trained_models=trained_models,
         evaluation_results=evaluation_results,
         features_info=features_info
     )
     
-    # Sauvegarder l'importance des caractéristiques
-    trainer.save_feature_importance(
-        trained_models=trained_models,
-        feature_names=list(X_train.columns)
-    )
-    
     return trained_models, evaluation_results, model_paths, best_model
+
 
 if __name__ == "__main__":
     import argparse
     
     parser = argparse.ArgumentParser(description="Entraîner des modèles de prédiction de défaillance industrielle")
     parser.add_argument("--data_path", type=str, required=True, help="Chemin vers les données prétraitées")
+    parser.add_argument("--test_path", type=str, default=None, help="Chemin vers le fichier de test (split temporel)")
     parser.add_argument("--target_column", type=str, default="failure_within_24h", help="Nom de la colonne cible")
     parser.add_argument("--models_dir", type=str, default="models", help="Répertoire pour sauvegarder les modèles")
     parser.add_argument("--test_size", type=float, default=0.2, help="Proportion des données pour le test")
     parser.add_argument("--random_state", type=int, default=42, help="Graine aléatoire pour la reproductibilité")
-    parser.add_argument("--cv", type=int, default=5, help="Nombre de plis pour la validation croisée")
+    parser.add_argument("--cv", type=int, default=3, help="Nombre de plis pour la validation croisée")
+    parser.add_argument("--n_jobs", type=int, default=1, help="Nombre de jobs parallèles (éviter -1 si freeze)")
+    parser.add_argument("--use_gpu", action="store_true", help="Activer GPU si disponible")
+    parser.add_argument("--sample_rows", type=int, default=None, help="Nombre de lignes à échantillonner pour test")
     parser.add_argument("--models", type=str, nargs="+", 
-                        choices=["random_forest", "gradient_boosting", "logistic_regression", "svm","lightgbm"],
+                        choices=["random_forest", "gradient_boosting", "logistic_regression", "svm", "xgboost", "lightgbm"],
                         help="Modèles à entraîner (tous par défaut)")
-    
-    args = parser.parse_args()
-    
 
+    parser.add_argument("--use_smote", action="store_true", help="Activer SMOTE (oversampling) sur le TRAIN uniquement")
+    parser.add_argument("--smote_sampling_strategy", type=float, default=0.2,
+                        help="Ratio minoritaire/majoritaire après SMOTE (ex: 0.2)")
+    parser.add_argument("--smote_k_neighbors", type=int, default=5,
+                        help="k_neighbors pour SMOTE")
+
+    args = parser.parse_args()
 
     train_and_evaluate(
         data_path=args.data_path,
+        test_path=args.test_path,
         target_column=args.target_column,
         models_to_train=args.models,
         models_dir=args.models_dir,
         test_size=args.test_size,
         random_state=args.random_state,
-        cv=args.cv
+        cv=args.cv,
+        use_gpu=args.use_gpu,
+        n_jobs=args.n_jobs,
+        sample_rows=args.sample_rows,
+        use_smote=args.use_smote,
+        smote_sampling_strategy=args.smote_sampling_strategy,
+        smote_k_neighbors=args.smote_k_neighbors
     )
-
-# new functions/update to add in train_model.py
-
-#import pour l'oversampling
-from imblearn.over_sampling import SMOTE, ADASYN, RandomOberSampler
-from  imblearn.under_sampling import RandomUnderSampler
-from imblearn.combine import SMOTEENN, SMOTETomek
-
-class ModelTrainer:
-    def __init__(self, ..., sampling_strategy=None):
-        # ...
-        self.sampling_strategy = sampling_strategy
-        
-    def apply_sampling(self, X_train, y_train):
-        """Applique une stratégie de rééchantillonnage si spécifiée."""
-        if self.sampling_strategy is None:
-            return X_train, y_train
-            
-        logger.info(f"Application du rééchantillonnage: {self.sampling_strategy}")
-        
-        if self.sampling_strategy == 'smote':
-            sampler = SMOTE(random_state=self.random_state)
-        elif self.sampling_strategy == 'adasyn':
-            sampler = ADASYN(random_state=self.random_state)
-        elif self.sampling_strategy == 'oversample':
-            sampler = RandomOverSampler(sampling_strategy=0.1, random_state=self.random_state)  # 10% au lieu de 50%
-        elif self.sampling_strategy == 'undersample':
-            sampler = RandomUnderSampler(sampling_strategy=0.5, random_state=self.random_state)
-        elif self.sampling_strategy == 'smoteenn':
-            sampler = SMOTEENN(random_state=self.random_state)
-        else:
-            logger.warning(f"Stratégie inconnue: {self.sampling_strategy}")
-            return X_train, y_train
-            
-        X_resampled, y_resampled = sampler.fit_resample(X_train, y_train)
-        
-        logger.info(f"Avant rééchantillonnage: {y_train.value_counts().to_dict()}")
-        logger.info(f"Après rééchantillonnage: {pd.Series(y_resampled).value_counts().to_dict()}")
-        
-        return X_resampled, y_resampled
-
-#metriques pour déséquilibre extrême
-def evaluate_models(self, trained_models, X_test, y_test):
-    """nouvelle version avec métriques pour déséquilibre extrême."""
-    evaluation_results = {}
-    
-    for model_name, model_info in trained_models.items():
-        model = model_info['model']
-        
-        # ... code.
-        
-        # Métriques supplémentaires importantes
-        from sklearn.metrics import precision_recall_curve, matthews_corrcoef
-        
-        # Courbe Precision-Recall
-        precision_curve, recall_curve, thresholds = precision_recall_curve(y_test, y_pred_proba)
-        
-        # Seuil optimal (maximise F1)
-        f1_scores = 2 * (precision_curve * recall_curve) / (precision_curve + recall_curve + 1e-9)
-        optimal_idx = np.argmax(f1_scores)
-        optimal_threshold = thresholds[optimal_idx] if optimal_idx < len(thresholds) else 0.5
-        
-        # Prédictions avec seuil optimal
-        y_pred_optimal = (y_pred_proba >= optimal_threshold).astype(int)
-        
-        # Matthews Correlation Coefficient (excellent pour déséquilibre)
-        mcc = matthews_corrcoef(y_test, y_pred_optimal)
-        
-        # Spécificité (important en déséquilibre)
-        tn, fp, fn, tp = conf_matrix.ravel()
-        specificity = tn / (tn + fp) if (tn + fp) > 0 else 0
-        
-        evaluation_results[model_name] = {
-            # ... métriques existantes ...
-            'mcc': mcc,
-            'specificity': specificity,
-            'optimal_threshold': optimal_threshold,
-            'precision_at_optimal': precision_curve[optimal_idx],
-            'recall_at_optimal': recall_curve[optimal_idx]
-        }
-        
-        logger.info(f"MCC: {mcc:.4f} | Spécificité: {specificity:.4f}")
-        logger.info(f"Seuil optimal: {optimal_threshold:.4f}")
-
-#entrainement du model
-
-def train_models(self, X_train, y_train, models_to_train=None, cv=3):
-    # validation stratifié, on remplace le cv3 pour etre sur d'avoir assez d'échantillon par fold
-    from sklearn.model_selection import StratifiedKFold
-    
-    skf = StratifiedKFold(n_splits=min(cv, 5), shuffle=True, random_state=self.random_state)
-
-    grid_search = GridSearchCV(
-        estimator=model,
-        param_grid=model_info['params'],
-        cv=skf,  # Au lieu de cv=cv
-        scoring='average_precision',
-        n_jobs=self.n_jobs,
-        verbose=1
-    )
-
-#in init, il faut ajuster les grilles de parametres
-# Dans __init__, ajustez vos grilles de paramètres :
-'xgboost': {
-    'model': xgb.XGBClassifier(
-        tree_method='hist',
-        random_state=random_state,
-        eval_metric='aucpr',  # Changez de logloss à aucpr
-        nthread=self.n_jobs
-    ),
-    'params': {
-        'n_estimators': [300, 500],
-        'learning_rate': [0.01, 0.05],  #+ petit
-        'max_depth': [3, 5, 7],
-        'subsample': [0.8, 1.0],
-        'colsample_bytree': [0.8, 1.0],
-        'min_child_weight': [3, 5, 7],  
-        'reg_alpha': [0, 0.1],  # Régularisation L1
-        'reg_lambda': [1, 2]    # Régularisation L2
-    }
-}
-
-#ajouter le SMOTE
-def train_and_evaluate(data_path, target_column='failure_within_24h', 
-                      sampling_strategy='smote',  # Nouveau paramètre
-                      **kwargs):
-    trainer = ModelTrainer(
-        data_path=data_path,
-        sampling_strategy=sampling_strategy,
-        **kwargs
-    )
-    
-    #  jusqu'à X_train, y_train 
-    
-    # Appliquer le rééchantillonnage
-    X_train_resampled, y_train_resampled = trainer.apply_sampling(X_train, y_train)
-    
-    trained_models = trainer.train_models(
-        X_train=X_train_resampled,
-        y_train=y_train_resampled,
-        **kwargs
-    )
-    
-    # Évaluer sur les vraies données de test pas rééchantillonné
-    evaluation_results = trainer.evaluate_models(
-        trained_models=trained_models,
-        X_test=X_test,
-        y_test=y_test
-    )
-
-
