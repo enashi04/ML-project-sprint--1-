@@ -1,0 +1,19 @@
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+.venv/
+venv/
+.env
+.git/
+
+# artefacts
+cleaned_data/
+augmented_data/
+featured_data/
+models/
+wandb/
+performance_reports/
+*.parquet
+*.csv
+*.pkl
+*.joblib
